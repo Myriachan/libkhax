@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
-#include <dirent.h>
 #include "khax.h"
 
 int main()
@@ -23,7 +22,7 @@ int main()
 	consoleClear();
 
 	Result result = khaxInit();
-	printf("khaxInit returned %08x\n", result);
+	printf("khaxInit returned %08lx\n", result);
 
 	while (aptMainLoop())
 	{
@@ -33,7 +32,9 @@ int main()
 		// Read which buttons are currently pressed 
 		hidScanInput();
 		u32 kDown = hidKeysDown();
+		(void) kDown;
 		u32 kHeld = hidKeysHeld();
+		(void) kHeld;
 
 		// If START is pressed, break loop and quit
 		if (kDown & KEY_X){
