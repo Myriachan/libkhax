@@ -377,6 +377,14 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	KHAX_printf("Step4:[2]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
 		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
 
+	// The next page should equal the fifth page.
+	if (m_extraLinear->m_freeBlock.m_next != m_versionData->ConvertLinearUserVAToKernelVA(
+		&m_overwriteMemory->m_pages[4]))
+	{
+		KHAX_printf("Step4:[2]->next != [4]\n");
+		return MakeError(26, 5, KHAX_MODULE, 1014);
+	}
+
 	// Copy the second freed page (fifth page) out to read its heap metadata.
 	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
 
@@ -392,7 +400,17 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	KHAX_printf("Step4:[4]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
 		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
 
-	return 1;
+	// The next page should equal the fifth page.
+	if (m_extraLinear->m_freeBlock.m_prev != m_versionData->ConvertLinearUserVAToKernelVA(
+		&m_overwriteMemory->m_pages[2]))
+	{
+		KHAX_printf("Step4:[4]->prev != [2]\n");
+		return MakeError(26, 5, KHAX_MODULE, 1014);
+	}
+
+	// Validation successful
+	++m_nextStep;
+	return 0;
 }
 
 //------------------------------------------------------------------------------------------------
@@ -492,8 +510,8 @@ Result KHAX::InverseGSPwn(void *dest, const void *src, std::size_t size, s64 wai
 		return result;
 	}
 
-	// Yay for arbitrary delays.
-	svcSleepThread(waitNanoseconds);
+	// Wait for the operation to finish.
+	gspWaitForPPF();
 
 	return 0;
 }
