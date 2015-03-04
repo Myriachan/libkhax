@@ -377,7 +377,7 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	KHAX_printf("Step4:[2]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
 		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
 
-	// The next page should equal the fifth page.
+	// The next page from the third should equal the fifth page.
 	if (m_extraLinear->m_freeBlock.m_next != m_versionData->ConvertLinearUserVAToKernelVA(
 		&m_overwriteMemory->m_pages[4]))
 	{
@@ -400,7 +400,7 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	KHAX_printf("Step4:[4]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
 		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
 
-	// The next page should equal the fifth page.
+	// The previous page from the fifth should equal the third page.
 	if (m_extraLinear->m_freeBlock.m_prev != m_versionData->ConvertLinearUserVAToKernelVA(
 		&m_overwriteMemory->m_pages[2]))
 	{
