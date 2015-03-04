@@ -133,8 +133,8 @@ namespace KHAX
 	enum : Result { KHAX_MODULE = 254 };
 	// Check whether this system is a New 3DS.
 	Result IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown = 0);
-	// Inverted gspwn, meant for reading from freed buffers.
-	Result InverseGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds);
+	// gspwn, meant for reading from or writing to freed buffers.
+	Result GSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds);
 }
 
 
@@ -364,7 +364,7 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	// Copy the first freed page (third page) out to read its heap metadata.
 	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
 
-	if (Result result = InverseGSPwn(m_extraLinear, &m_overwriteMemory->m_pages[2],
+	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[2],
 		sizeof(*m_extraLinear), 10000000))
 	{
 		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
@@ -388,7 +388,7 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	// Copy the second freed page (fifth page) out to read its heap metadata.
 	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
 
-	if (Result result = InverseGSPwn(m_extraLinear, &m_overwriteMemory->m_pages[4],
+	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[4],
 		sizeof(*m_extraLinear), 10000000))
 	{
 		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
@@ -489,8 +489,8 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 }
 
 //------------------------------------------------------------------------------------------------
-// Inverted gspwn, meant for reading from freed buffers.
-Result KHAX::InverseGSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds)
+// gspwn, meant for reading from or writing to freed buffers.
+Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds)
 {
 	// Attempt a flush of the source, but ignore the result, since we may have just been asked to
 	// read unmapped memory or something similar.
