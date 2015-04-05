@@ -152,6 +152,9 @@ namespace KHAX
 		static_assert(sizeof(ExtraLinearMemory) % 16 == 0, "ExtraLinearMemory isn't a multiple of 16 bytes");
 		ExtraLinearMemory *m_extraLinear;
 
+		// Copy of the old ACL
+		KSVCACL m_oldACL;
+
 		//char m_blah[0x280];
 
 		// Pointer to our instance.
@@ -565,6 +568,19 @@ Result KHAX::MemChunkHax::Step6_ExecuteSVCCode()
 		return result;
 	}
 
+#ifdef KHAX_DEBUG
+	char oldACLString[KHAX_lengthof(m_oldACL) * 2 + 1];
+	char *sp = oldACLString;
+	for (unsigned char b : m_oldACL)
+	{
+		*sp++ = "0123456789abcdef"[b >> 4];
+		*sp++ = "0123456789abcdef"[b & 15];
+	}
+	*sp = '\0';
+
+	KHAX_printf("oldACL:%s\n", oldACLString);
+#endif
+
 	++m_nextStep;
 	return 0;
 }
@@ -669,6 +685,9 @@ Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 
 	// Get the SVC ACL within the KProcess.
 	KSVCACL &acl = (*m_versionData->m_svcAccessControlConvert)(kprocess);
+
+	// Save the old one for diagnostic purposes.
+	std::memcpy(m_oldACL, acl, sizeof(acl));
 
 	// Grant ourselves access to everything, except don't grant access to nonexistent services
 	// 00, 7E or 7F.
@@ -833,35 +852,6 @@ Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 	return 0;
 }
 
-void __attribute__((__naked__)) CreateThreadTest(u32 (&regs)[5])
-{
-	__asm__ volatile(
-		"push {r4}\n\t"
-		"push {r0}\n\t"
-		"mov r0, #30\n\t"
-		"mov r1, #0\n\t"
-		"mov r2, #123\n\t"
-		"mov r3, #34\n\t"
-		"mov r4, #0x7FFFFFFF\n\t"
-		"svc 0x08\n\t"
-		"push {r0}\n\t"
-		"ldr r0, [sp, #4]\n\t"
-		"str r1, [r0, #4]\n\t"
-		"ldr r1, [sp]\n\t"
-		"str r1, [r0]\n\t"
-		"str r2, [r0, #8]\n\t"
-		"str r3, [r0, #12]\n\t"
-		"str r4, [r0, #16]\n\t"
-		"pop {r0}\n\t"
-		"pop {r0}\n\t"
-		"pop {r4}\n\t"
-		"bx lr\n\t"
-		:
-		:
-		: "r0", "r1", "r2", "r3", "cc", "memory"
-		);
-}
-
 //------------------------------------------------------------------------------------------------
 // Converts a structure pointer to a reference to the given member.
 template <typename T, typename M, M T::*MP>
@@ -928,12 +918,6 @@ extern "C" Result khaxInit()
 		KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
 		return result;
 	}
-
-/*	u32 testValues[5];
-	CreateThreadTest(testValues);
-	KHAX_printf("test:[0]=%08lX [1]=%08lX\n", testValues[0], testValues[1]);
-	KHAX_printf("test:[2]=%08lX [3]=%08lX\n", testValues[2], testValues[3]);
-	KHAX_printf("test:[4]=%08lX\n", testValues[4]);*/
 
 	KHAX_printf("khaxInit: end of implementation\n");
 	return MakeError(27, 6, KHAX_MODULE, 1012);
