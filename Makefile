@@ -35,6 +35,7 @@ APP_TITLE       :=  khax
 APP_DESCRIPTION :=  ARM11 KernelHax
 APP_AUTHOR      :=  Myria
 ICON            :=  logo.png
+NO_SMDH			:= 1
 
 #---------------------------------------------------------------------------------
 # options for code generation

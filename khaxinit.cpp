@@ -685,6 +685,8 @@ Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 
 	// Get the SVC ACL within the KProcess.
 	KSVCACL &acl = (*m_versionData->m_svcAccessControlConvert)(kprocess);
+        *(int *)(m_versionData->m_syscallPatchAddress) = 0xE1A00000;
+        *(int *)(m_versionData->m_syscallPatchAddress+8) = 0xE1A00000;
 
 	// Save the old one for diagnostic purposes.
 	std::memcpy(m_oldACL, acl, sizeof(acl));
