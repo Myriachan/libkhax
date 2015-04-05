@@ -26,8 +26,11 @@
     <None Include="Makefile" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="khaxinternal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="khax.h">
-      <Filter>Source Files</Filter>
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
