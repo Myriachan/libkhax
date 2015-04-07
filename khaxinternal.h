@@ -1,6 +1,7 @@
 #pragma once
 
 #define KHAX_DEBUG
+//#define KHAX_DEBUG_DUMP_DATA
 
 #ifdef KHAX_DEBUG
 	#define KHAX_printf(...) printf(__VA_ARGS__), gspWaitForVBlank(), gfxFlushBuffers(), gfxSwapBuffers()
@@ -65,13 +66,65 @@ namespace KHAX
 		"KSynchronizationObject isn't the expected layout.");
 
 	//------------------------------------------------------------------------------------------------
-	class KThread;
+	struct KDebugThread;
 	struct KThreadLocalPage;
 	class KCodeSet;
 
 	//------------------------------------------------------------------------------------------------
 	// Unofficial name
 	typedef u8 KSVCACL[0x80 / 8];
+
+	//------------------------------------------------------------------------------------------------
+	// Kernel's internal structure of a thread object.
+	class KThread : public KSynchronizationObject
+	{
+	public:
+		u32 m_unknown014;                               // +014
+		u32 m_unknown018;                               // +018
+		u32 m_unknown01C;                               // +01C
+		u32 m_unknown020;                               // +020
+		u32 m_unknown024;                               // +024
+		u32 m_unknown028;                               // +028
+		u32 m_unknown02C;                               // +02C
+		u32 m_unknown030;                               // +030
+		u32 m_unknown034;                               // +034
+		KDebugThread *m_debugThread;                    // +038
+		s32 m_threadPriority;                           // +03C
+		void *m_waitingOnObject;                        // +040
+		u32 m_unknown044;                               // +044
+		KThread **m_schedulerUnknown048;                // +048
+		void *m_arbitrationAddress;                     // +04C
+		u32 m_unknown050;                               // +050
+		u32 m_unknown054;                               // +054
+		u32 m_unknown058;                               // +058
+		KLinkedListNode *m_waitingOnList;               // +05C
+		u32 m_unknownListCount;                         // +060
+		KLinkedListNode *m_unknownListHead;             // +064
+		KLinkedListNode *m_unknownListTail;             // +068
+		s32 m_threadPriority2;                          // +06C
+		s32 m_creatingProcessor;                        // +070
+		u32 m_unknown074;                               // +074
+		u32 m_unknown078;                               // +078
+		u16 m_unknown07C;                               // +07C
+		u8 m_threadType;                                // +07E
+		u8 m_padding07F;                                // +07F
+		void *m_process;                                // +080
+		u32 m_threadID;                                 // +084
+		void *m_svcThreadArea;                          // +088
+		void *m_svcPageEnd;                             // +08C
+		s32 m_idealProcessor;                           // +090
+		void *m_tlsUserMode;                            // +094
+		void *m_tlsKernelMode;                          // +098
+		u32 m_unknown09C;                               // +09C
+		KThread *m_prev;                                // +0A0
+		KThread *m_next;                                // +0A4
+		KThread **m_temporaryLinkedList;                // +0A8
+		u32 m_unknown0AC;                               // +0B0
+	};
+	static_assert(sizeof(KThread) == 0x0B0,
+		"KThread isn't the expected size.");
+	static_assert(offsetof(KThread, m_svcThreadArea) == 0x088,
+		"KThread isn't the expected layout.");
 
 	//------------------------------------------------------------------------------------------------
 	// Kernel's internal structure of a process object.

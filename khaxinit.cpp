@@ -34,6 +34,8 @@ namespace KHAX
 		static constexpr const u32 m_fcramPhysicalAddress = 0x20000000;
 		// Physical size of FCRAM on this machine
 		u32 m_fcramSize;
+		// Address of KThread address in kernel (KThread **)
+		static constexpr const u32 m_currentKThreadPtr = 0xFFFF9000;
 		// Address of KProcess address in kernel (KProcess **)
 		static constexpr const u32 m_currentKProcessPtr = 0xFFFF9004;
 		// Function taking a KProcess * (as void *) and returning SVC access control array
@@ -102,6 +104,10 @@ namespace KHAX
 		// Flush instruction and data caches.
 		Result Step6f_FlushCaches();
 
+		// Helper for dumping memory to SD card.
+		template <std::size_t S>
+		bool DumpMemberToSDCard(const unsigned char (MemChunkHax::*member)[S], const char *filename) const;
+
 		// Result returned by hacked svcCreateThread upon success.
 		static constexpr const Result STEP6_SUCCESS_RESULT = 0x1337C0DE;
 
@@ -155,7 +161,12 @@ namespace KHAX
 		// Copy of the old ACL
 		KSVCACL m_oldACL;
 
-		//char m_blah[0x280];
+		// Buffers for dumped data when debugging.
+	#ifdef KHAX_DEBUG_DUMP_DATA
+		unsigned char m_savedKProcess[sizeof(KProcess_8_0_0_New)];
+		unsigned char m_savedKThread[sizeof(KThread)];
+		unsigned char m_savedThreadSVC[0x100];
+	#endif
 
 		// Pointer to our instance.
 		static MemChunkHax *volatile s_instance;
@@ -681,12 +692,19 @@ Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 	// Get the KProcess pointer, whose type varies by kernel version.
 	void *kprocess = *reinterpret_cast<void **>(m_versionData->m_currentKProcessPtr);
 
-	/*std::memcpy(m_blah, kprocess, sizeof(m_blah));*/
+	// Debug dumping.
+#ifdef KHAX_DEBUG_DUMP_DATA
+	// Get the KThread pointer.  Its type doesn't vary, so far.
+	KThread *kthread = *reinterpret_cast<KThread **>(m_versionData->m_currentKThreadPtr);
+
+	void *svcData = reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(kthread->m_svcThreadArea) & ~std::uintptr_t(0xFF));
+	std::memcpy(m_savedKProcess, kprocess, sizeof(m_savedKProcess));
+	std::memcpy(m_savedKThread, kthread, sizeof(m_savedKThread));
+	std::memcpy(m_savedThreadSVC, svcData, sizeof(m_savedThreadSVC));
+#endif
 
 	// Get the SVC ACL within the KProcess.
 	KSVCACL &acl = (*m_versionData->m_svcAccessControlConvert)(kprocess);
-        *(int *)(m_versionData->m_syscallPatchAddress) = 0xE1A00000;
-        *(int *)(m_versionData->m_syscallPatchAddress+8) = 0xE1A00000;
 
 	// Save the old one for diagnostic purposes.
 	std::memcpy(m_oldACL, acl, sizeof(acl));
@@ -716,23 +734,44 @@ Result KHAX::MemChunkHax::Step6f_FlushCaches()
 }
 
 //------------------------------------------------------------------------------------------------
+// Helper for dumping memory to SD card.
+template <std::size_t S>
+bool KHAX::MemChunkHax::DumpMemberToSDCard(const unsigned char(MemChunkHax::*member)[S], const char *filename) const
+{
+	char formatted[32];
+	snprintf(formatted, KHAX_lengthof(formatted), filename,
+		static_cast<unsigned>(m_versionData->m_kernelVersion), m_versionData->m_new3DS ?
+		"New" : "Old");
+
+	bool result = true;
+
+	FILE *file = std::fopen(formatted, "wb");
+	if (file)
+	{
+		result = result && (std::fwrite(this->*member, 1, sizeof(this->*member), file) == 1);
+		std::fclose(file);
+	}
+	else
+	{
+		result = false;
+	}
+
+	return result;
+}
+
+//------------------------------------------------------------------------------------------------
 // Free memory and such.
 KHAX::MemChunkHax::~MemChunkHax()
 {
-/*	if (m_nextStep > 6)
+	// Dump memory to SD card if that is enabled.
+#ifdef KHAX_DEBUG_DUMP_DATA
+	if (m_nextStep > 6)
 	{
-		char filename[32];
-		snprintf(filename, KHAX_lengthof(filename), "KProcess-%08X-%s.bin",
-			static_cast<unsigned>(m_versionData->m_kernelVersion), m_versionData->m_new3DS ?
-			"New" : "Old");
-
-		FILE *file = fopen(filename, "wb");
-		if (file)
-		{
-			fwrite(m_blah, 1, sizeof(m_blah), file);
-			fclose(file);
-		}
-	}*/
+		DumpMemberToSDCard(&MemChunkHax::m_savedKProcess, "KProcess-%08X-%s.bin");
+		DumpMemberToSDCard(&MemChunkHax::m_savedKThread, "KThread-%08X-%s.bin");
+		DumpMemberToSDCard(&MemChunkHax::m_savedThreadSVC, "ThreadSVC-%08X-%s.bin");
+	}
+#endif
 
 	// If we're corrupted, we're dead.
 	if (m_corrupted > 0)
@@ -922,5 +961,5 @@ extern "C" Result khaxInit()
 	}
 
 	KHAX_printf("khaxInit: end of implementation\n");
-	return MakeError(27, 6, KHAX_MODULE, 1012);
+	return 0; // MakeError(27, 6, KHAX_MODULE, 1012);
 }
