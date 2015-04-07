@@ -8,16 +8,20 @@
 #ifndef _MSC_VER
 __attribute__((__naked__))
 #endif
-Result my_svcBackdoor(s32(*callback)(void))
+Result my_svcBackdoor(s32 (*callback)(void))
 {
 	__asm__ volatile(
 		"svc 0x7B\n\t"
 		"bx lr\n\t");
 }
 
+s32 g_backdoorResult = -1;
+
 s32 dump_chunk_wrapper()
 {
-	return 0x6666abcd;
+	__asm__ volatile("cpsid aif");
+	g_backdoorResult = 0x6666abcd;
+	return 0;
 }
 
 int main()
@@ -39,7 +43,7 @@ int main()
 	Result result = khaxInit();
 	printf("khaxInit returned %08lx\n", result);
 
-//	printf("backdoor returned %08lx\n", my_svcBackdoor(dump_chunk_wrapper));
+	printf("backdoor returned %08lx\n", (my_svcBackdoor(dump_chunk_wrapper), g_backdoorResult));
 
 	while (aptMainLoop())
 	{

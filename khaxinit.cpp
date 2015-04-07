@@ -183,6 +183,10 @@ namespace KHAX
 	// Converts a structure pointer to a reference to the given member.
 	template <typename T, typename M, M T::*MP>
 	M &StructMemberThunk(void *object);
+	// Given a pointer to a structure that is a member of another structure,
+	// return a pointer to the outer structure.  Inspired by Windows macro.
+	template <typename Outer, typename Inner>
+	Outer *ContainingRecord(Inner *member, Inner Outer::*field);
 }
 
 
@@ -689,29 +693,32 @@ Result KHAX::MemChunkHax::Step6d_FixHeapCorruption()
 // Grant our process access to all system calls, including svcBackdoor.
 Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 {
-	// Get the KProcess pointer, whose type varies by kernel version.
-	void *kprocess = *reinterpret_cast<void **>(m_versionData->m_currentKProcessPtr);
+	// Everything, except nonexistent services 00, 7E or 7F.
+	static constexpr const char s_fullAccessACL[] = "\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x3F";
 
-	// Debug dumping.
-#ifdef KHAX_DEBUG_DUMP_DATA
 	// Get the KThread pointer.  Its type doesn't vary, so far.
 	KThread *kthread = *reinterpret_cast<KThread **>(m_versionData->m_currentKThreadPtr);
 
-	void *svcData = reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(kthread->m_svcThreadArea) & ~std::uintptr_t(0xFF));
+	// Debug dumping.
+#ifdef KHAX_DEBUG_DUMP_DATA
+	// Get the KProcess pointer, whose type varies by kernel version.
+	void *kprocess = *reinterpret_cast<void **>(m_versionData->m_currentKProcessPtr);
+
+	void *svcData = reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(kthread->m_svcRegisterState) & ~std::uintptr_t(0xFF));
 	std::memcpy(m_savedKProcess, kprocess, sizeof(m_savedKProcess));
 	std::memcpy(m_savedKThread, kthread, sizeof(m_savedKThread));
 	std::memcpy(m_savedThreadSVC, svcData, sizeof(m_savedThreadSVC));
 #endif
 
-	// Get the SVC ACL within the KProcess.
-	KSVCACL &acl = (*m_versionData->m_svcAccessControlConvert)(kprocess);
+	// Get a pointer to the SVC ACL within the SVC area for the thread.
+	SVCThreadArea *svcThreadArea = ContainingRecord<SVCThreadArea>(kthread->m_svcRegisterState, &SVCThreadArea::m_svcRegisterState);
+	KSVCACL &threadACL = svcThreadArea->m_svcAccessControl;
 
 	// Save the old one for diagnostic purposes.
-	std::memcpy(m_oldACL, acl, sizeof(acl));
+	std::memcpy(m_oldACL, threadACL, sizeof(threadACL));
 
-	// Grant ourselves access to everything, except don't grant access to nonexistent services
-	// 00, 7E or 7F.
-	std::memcpy(acl, "\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x3F", sizeof(acl));
+	// Set the ACL for the current thread.
+	std::memcpy(threadACL, s_fullAccessACL, sizeof(threadACL));
 
 	return 0;
 }
@@ -899,6 +906,17 @@ template <typename T, typename M, M T::*MP>
 M &KHAX::StructMemberThunk(void *object)
 {
 	return (static_cast<T *>(object))->*MP;
+}
+
+//------------------------------------------------------------------------------------------------
+// Given a pointer to a structure that is a member of another structure,
+// return a pointer to the outer structure.  Inspired by Windows macro.
+template <typename Outer, typename Inner>
+Outer *KHAX::ContainingRecord(Inner *member, Inner Outer::*field)
+{
+	unsigned char *p = reinterpret_cast<unsigned char *>(member);
+	p -= reinterpret_cast<std::uintptr_t>(&(static_cast<Outer *>(nullptr)->*field));
+	return reinterpret_cast<Outer *>(p);
 }
 
 //------------------------------------------------------------------------------------------------

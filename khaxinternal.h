@@ -17,6 +17,9 @@
 	#if _MSC_VER < 1900
 		#define alignof __alignof
 	#endif
+	#define KHAX_ATTRIBUTE(...)
+#else
+	#define KHAX_ATTRIBUTE(...) __VA_ARGS__
 #endif
 
 #define KHAX_lengthof(...) (sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]))
@@ -75,6 +78,56 @@ namespace KHAX
 	typedef u8 KSVCACL[0x80 / 8];
 
 	//------------------------------------------------------------------------------------------------
+	// ARM VFP register
+	union KHAX_ATTRIBUTE(__attribute__((__aligned__(4))) __attribute__((__packed__))) VFPRegister
+	{
+		float m_single[2];
+		double m_double;
+	};
+	static_assert(alignof(VFPRegister) == 0x004,
+		"VFPRegister isn't the expected alignment.");
+	static_assert(sizeof(VFPRegister) == 0x008,
+		"VFPRegister isn't the expected size.");
+
+	//------------------------------------------------------------------------------------------------
+	// SVC-mode register save area.
+	// http://3dbrew.org/wiki/Memory_layout#0xFF4XX000
+	struct SVCRegisterState
+	{
+		u32 m_r4;                                       // +000
+		u32 m_r5;                                       // +004
+		u32 m_r6;                                       // +008
+		u32 m_r7;                                       // +00C
+		u32 m_r8;                                       // +010
+		u32 m_r9;                                       // +014
+		u32 m_sl;                                       // +018
+		u32 m_fp;                                       // +01C
+		u32 m_sp;                                       // +020
+		u32 m_lr;                                       // +024
+	};
+	static_assert(sizeof(SVCRegisterState) == 0x028,
+		"SVCRegisterState isn't the expected size.");
+
+	//------------------------------------------------------------------------------------------------
+	// SVC-mode thread state structure.  This is the last part of the per-
+	// thread page allocated in 0xFF4XX000.
+	// http://3dbrew.org/wiki/Memory_layout#0xFF4XX000
+	struct SVCThreadArea
+	{
+		KSVCACL m_svcAccessControl;                     // +000
+		u32 m_unknown010;                               // +010
+		u32 m_unknown014;                               // +014
+		SVCRegisterState m_svcRegisterState;            // +018
+		VFPRegister m_vfpRegisters[16];                 // +040
+		u32 m_unknown0C4;                               // +0C0
+		u32 m_fpexc;                                    // +0C4
+	};
+	static_assert(offsetof(SVCThreadArea, m_svcRegisterState) == 0x018,
+		"ThreadSVCArea isn't the expected layout.");
+	static_assert(sizeof(SVCThreadArea) == 0x0C8,
+		"ThreadSVCArea isn't the expected size.");
+
+	//------------------------------------------------------------------------------------------------
 	// Kernel's internal structure of a thread object.
 	class KThread : public KSynchronizationObject
 	{
@@ -110,7 +163,7 @@ namespace KHAX
 		u8 m_padding07F;                                // +07F
 		void *m_process;                                // +080
 		u32 m_threadID;                                 // +084
-		void *m_svcThreadArea;                          // +088
+		SVCRegisterState *m_svcRegisterState;           // +088
 		void *m_svcPageEnd;                             // +08C
 		s32 m_idealProcessor;                           // +090
 		void *m_tlsUserMode;                            // +094
@@ -123,7 +176,7 @@ namespace KHAX
 	};
 	static_assert(sizeof(KThread) == 0x0B0,
 		"KThread isn't the expected size.");
-	static_assert(offsetof(KThread, m_svcThreadArea) == 0x088,
+	static_assert(offsetof(KThread, m_svcRegisterState) == 0x088,
 		"KThread isn't the expected layout.");
 
 	//------------------------------------------------------------------------------------------------
