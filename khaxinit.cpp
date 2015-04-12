@@ -394,6 +394,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[2]), 0,
 		sizeof(m_overwriteMemory->m_pages[2]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
 	{
+		KHAX_printf("Step3:svcCM1 failed:%08lx\n", result);
 		return result;
 	}
 	m_overwriteAllocated &= ~(1u << 2);
@@ -402,6 +403,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[4]), 0,
 		sizeof(m_overwriteMemory->m_pages[4]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
 	{
+		KHAX_printf("Step3:svcCM2 failed:%08lx\n", result);
 		return result;
 	}
 	m_overwriteAllocated &= ~(1u << 4);
@@ -415,7 +417,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[3].m_bytes[0]) = 0;
 	//KHAX_printf("Step2:probing page [5]\n");
 	*static_cast<volatile u8 *>(&m_overwriteMemory->m_pages[5].m_bytes[0]) = 0;
-	KHAX_printf("Step2:probing done\n");
+	KHAX_printf("Step3:probing done\n");
 
 	// Done.
 	++m_nextStep;
