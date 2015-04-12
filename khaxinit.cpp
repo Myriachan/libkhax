@@ -392,7 +392,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 
 	// Free the third page.
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[2]), 0,
-		sizeof(m_overwriteMemory->m_pages[2]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
+		sizeof(m_overwriteMemory->m_pages[2]), MEMOP_FREE, static_cast<MemPerm>(0)))
 	{
 		KHAX_printf("Step3:svcCM1 failed:%08lx\n", result);
 		return result;
@@ -401,7 +401,7 @@ Result KHAX::MemChunkHax::Step3_SurroundFree()
 
 	// Free the fifth page.
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[4]), 0,
-		sizeof(m_overwriteMemory->m_pages[4]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
+		sizeof(m_overwriteMemory->m_pages[4]), MEMOP_FREE, static_cast<MemPerm>(0)))
 	{
 		KHAX_printf("Step3:svcCM2 failed:%08lx\n", result);
 		return result;
@@ -535,7 +535,7 @@ Result KHAX::MemChunkHax::Step5_CorruptCreateThread()
 	// page into the second page, and in the process zap an instruction pair in svcCreateThread.
 	u32 dummy;
 	if (Result result = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[1]),
-		0, sizeof(m_overwriteMemory->m_pages[1]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0)))
+		0, sizeof(m_overwriteMemory->m_pages[1]), MEMOP_FREE, static_cast<MemPerm>(0)))
 	{
 		KHAX_printf("Step5:free to pwn failed:%08lx\n", result);
 		return result;
@@ -804,7 +804,7 @@ KHAX::MemChunkHax::~MemChunkHax()
 			if (m_overwriteAllocated & (1u << x))
 			{
 				Result res = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[x]), 0,
-					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE_LINEAR, static_cast<MemPerm>(0));
+					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE, static_cast<MemPerm>(0));
 				KHAX_printf("free %u: %08lx\n", x, res);
 			}
 		}
