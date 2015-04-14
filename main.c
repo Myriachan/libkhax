@@ -24,6 +24,7 @@ s32 dump_chunk_wrapper()
 	return 0;
 }
 
+#ifndef LIBKHAX_AS_LIB
 int main()
 {
 	// Initialize services
@@ -82,3 +83,4 @@ int main()
 	// Return to hbmenu
 	return 0;
 }
+#endif
