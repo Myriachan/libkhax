@@ -28,6 +28,8 @@ namespace KHAX
 		static constexpr const u32 m_threadPatchOriginalCode = 0x8DD00CE5;
 		// System call unlock patch location
 		u32 m_syscallPatchAddress;
+		// Offset of PID in KProcess.
+		u32 m_kprocessPidOffset;
 		// Kernel virtual address mapping of FCRAM
 		u32 m_fcramVirtualAddress;
 		// Physical mapping of FCRAM on this machine
@@ -38,6 +40,8 @@ namespace KHAX
 		static constexpr const u32 m_currentKThreadPtr = 0xFFFF9000;
 		// Address of KProcess address in kernel (KProcess **)
 		static constexpr const u32 m_currentKProcessPtr = 0xFFFF9004;
+		// Handle of the current KProcess.
+		static constexpr const Handle m_currentKProcessHandle = 0xFFFF8001;
 		// Function taking a KProcess * (as void *) and returning SVC access control array
 		KSVCACL &(*m_svcAccessControlConvert)(void *kprocess);
 
@@ -89,6 +93,8 @@ namespace KHAX
 		Result Step5_CorruptCreateThread();
 		// Execute svcCreateThread to execute code at SVC privilege.
 		Result Step6_ExecuteSVCCode();
+		// Grant access to all services.
+		Result Step7_GrantServiceAccess();
 
 	private:
 		// SVC-mode entry point thunk (true entry point).
@@ -103,6 +109,10 @@ namespace KHAX
 		Result Step6e_GrantSVCAccess();
 		// Flush instruction and data caches.
 		Result Step6f_FlushCaches();
+		// Patch the PID to 0.
+		static Result Step7a_PatchPid();
+		// Restore the original PID.
+		static Result Step7b_UnpatchPid();
 
 		// Helper for dumping memory to SD card.
 		template <std::size_t S>
@@ -161,6 +171,9 @@ namespace KHAX
 		// Copy of the old ACL
 		KSVCACL m_oldACL;
 
+		// Original PID.
+		u32 m_originalPid;
+
 		// Buffers for dumped data when debugging.
 	#ifdef KHAX_DEBUG_DUMP_DATA
 		unsigned char m_savedKProcess[sizeof(KProcess_8_0_0_New)];
@@ -204,19 +217,19 @@ const KHAX::VersionData KHAX::VersionData::s_versionTable[] =
 	&KProcess_##ver::m_svcAccessControl>
 
 	// Old 3DS, old address layout
-	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xAC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
 	// Old 3DS, new address layout
-	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xB4, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xB4, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
 	// New 3DS
-	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) }, // untested
-	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xBC, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) }, // untested
+	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xBC, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) },
 
 #undef SVC_FUNC
 };
@@ -743,6 +756,52 @@ Result KHAX::MemChunkHax::Step6f_FlushCaches()
 }
 
 //------------------------------------------------------------------------------------------------
+// Grant access to all services.
+Result KHAX::MemChunkHax::Step7_GrantServiceAccess()
+{
+	// Backup the original PID.
+	svcGetProcessId(&m_originalPid, m_versionData->m_currentKProcessHandle);
+
+	// Patch the PID to 0, granting access to all services.
+	svcBackdoor(Step7a_PatchPid);
+
+	// Check if PID patching succeeded.
+	u32 newPid;
+	svcGetProcessId(&newPid, m_versionData->m_currentKProcessHandle);
+	if(newPid != 0) {
+		return MakeError(27, 11, KHAX_MODULE, 1023);
+	}
+
+	// Reinit srv to gain access to all services.
+	srvExit();
+	srvInit();
+
+	// Restore the original PID.
+	svcBackdoor(Step7b_UnpatchPid);
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Patch the PID to 0.
+Result KHAX::MemChunkHax::Step7a_PatchPid()
+{
+	// Patch the PID to 0.
+	u32 kprocess = *reinterpret_cast<u32 *>(s_instance->m_versionData->m_currentKProcessPtr);
+	*(u32*) (kprocess + s_instance->m_versionData->m_kprocessPidOffset) = 0;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Restore the original PID.
+Result KHAX::MemChunkHax::Step7b_UnpatchPid()
+{
+	// Patch the PID back to the original value.
+	u32 kprocess = *reinterpret_cast<u32 *>(s_instance->m_versionData->m_currentKProcessPtr);
+	*(u32*) (kprocess + s_instance->m_versionData->m_kprocessPidOffset) = s_instance->m_originalPid;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
 // Helper for dumping memory to SD card.
 template <std::size_t S>
 bool KHAX::MemChunkHax::DumpMemberToSDCard(const unsigned char(MemChunkHax::*member)[S], const char *filename) const
@@ -977,6 +1036,11 @@ extern "C" Result khaxInit()
 	if (Result result = hax.Step6_ExecuteSVCCode())
 	{
 		KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
+		return result;
+	}
+	if (Result result = hax.Step7_GrantServiceAccess())
+	{
+		KHAX_printf("khaxInit: Step7 failed: %08lx\n", result);
 		return result;
 	}
 
