@@ -1,12 +1,12 @@
+#ifndef LIBKHAX_AS_LIB
+
 #include <3ds.h>
 #include <3ds/services/am.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
-#include "khax.h"
-
-#ifndef LIBKHAX_AS_LIB
+#include "../khax.h"
 
 #define KHAX_lengthof(...) (sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]))
 
