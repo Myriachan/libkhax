@@ -18,7 +18,7 @@
     <ClCompile Include="main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="khaxinit.cpp">
+    <ClCompile Include="../khaxinit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -26,10 +26,10 @@
     <None Include="Makefile" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="khaxinternal.h">
+    <ClInclude Include="../khaxinternal.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="khax.h">
+    <ClInclude Include="../khax.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -66,15 +66,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="khaxinit.cpp" />
+    <ClCompile Include="../khaxinit.cpp" />
     <ClCompile Include="main.c" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Makefile" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="khax.h" />
-    <ClInclude Include="khaxinternal.h" />
+    <ClInclude Include="../khax.h" />
+    <ClInclude Include="../khaxinternal.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
