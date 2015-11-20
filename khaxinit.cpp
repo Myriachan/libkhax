@@ -659,7 +659,8 @@ __attribute__((__naked__))
 #endif
 Result KHAX::MemChunkHax::Step6a_SVCEntryPointThunk()
 {
-	__asm__ volatile("add sp, sp, #8");
+	__asm__ volatile("cpsid aif\n"
+		"add sp, sp, #8\n");
 
 	register Result result __asm__("r0") = s_instance->Step6b_SVCEntryPoint();
 
