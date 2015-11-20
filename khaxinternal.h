@@ -1,12 +1,9 @@
 #pragma once
 
-#define KHAX_DEBUG
-//#define KHAX_DEBUG_DUMP_DATA
-
 #ifdef KHAX_DEBUG
 	#define KHAX_printf(...) printf(__VA_ARGS__), gspWaitForVBlank(), gfxFlushBuffers(), gfxSwapBuffers()
 #else
-	#define KHAX_printf static_cast<void>
+	#define KHAX_printf(...) gspWaitForVBlank(), gfxFlushBuffers(), gfxSwapBuffers()
 #endif
 
 // Shut up IntelliSense warnings when using MSVC as an IDE, even though MSVC will obviously never
