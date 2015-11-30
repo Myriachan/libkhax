@@ -931,6 +931,7 @@ KHAX::MemChunkHax::~MemChunkHax()
 				Result res = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[x]), 0,
 					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE, static_cast<MemPerm>(0));
 				KHAX_printf("free %u: %08lx\n", x, res);
+				KHAX_UNUSED(res);
 			}
 		}
 	}

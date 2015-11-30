@@ -20,6 +20,7 @@
 #endif
 
 #define KHAX_lengthof(...) (sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]))
+#define KHAX_UNUSED(...) static_cast<void>(__VA_ARGS__)
 
 //------------------------------------------------------------------------------------------------
 namespace KHAX
