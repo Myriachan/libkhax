@@ -269,11 +269,8 @@ void *KHAX::VersionData::ConvertLinearUserVAToKernelVA(void *address) const
 	static_assert((std::numeric_limits<std::uintptr_t>::max)() == (std::numeric_limits<u32>::max)(),
 		"you're sure that this is a 3DS?");
 
-	// Need the pointer as an integer.
-	u32 addr = reinterpret_cast<u32>(address);
-
 	// Convert the address to a physical address, since that's how we know the mapping.
-	u32 physical = osConvertVirtToPhys(addr);
+	u32 physical = osConvertVirtToPhys(address);
 	if (physical == 0)
 	{
 		return nullptr;
@@ -983,7 +980,7 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 		// Check whether the system is a New 3DS.  If this fails, abort, because being wrong would
 		// crash the system.
 		u8 isNew3DS = 0;
-		if (Result error = APT_CheckNew3DS(nullptr, &isNew3DS))
+		if (Result error = APT_CheckNew3DS(&isNew3DS))
 		{
 			*answer = false;
 			return error;
@@ -1004,7 +1001,7 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 {
 	// Copy that floppy.
-	if (Result result = GX_SetTextureCopy(nullptr, static_cast<u32 *>(const_cast<void *>(src)), 0,
+	if (Result result = GX_TextureCopy(static_cast<u32 *>(const_cast<void *>(src)), 0,
 		static_cast<u32 *>(dest), 0, size, 8))
 	{
 		KHAX_printf("gspwn:copy fail:%08lx\n", result);
@@ -1022,14 +1019,12 @@ Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 
 Result KHAX::userFlushDataCache(const void *p, std::size_t n)
 {
-	return GSPGPU_FlushDataCache(
-		nullptr, static_cast<u8 *>(const_cast<void *>(p)), n);
+	return GSPGPU_FlushDataCache(p, n);
 }
 
 Result KHAX::userInvalidateDataCache(const void *p, std::size_t n)
 {
-	return GSPGPU_InvalidateDataCache(
-		nullptr, static_cast<u8 *>(const_cast<void *>(p)), n);
+	return GSPGPU_InvalidateDataCache(p, n);
 }
 
 void KHAX::userFlushPrefetch()
