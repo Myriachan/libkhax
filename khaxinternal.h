@@ -1,9 +1,9 @@
 #pragma once
 
 #ifdef KHAX_DEBUG
-	#define KHAX_printf(...) printf(__VA_ARGS__), gspWaitForVBlank(), gfxFlushBuffers(), gfxSwapBuffers()
+	#define KHAX_printf(...) printf(__VA_ARGS__)
 #else
-	#define KHAX_printf(...) gspWaitForVBlank(), gfxFlushBuffers(), gfxSwapBuffers()
+	#define KHAX_printf(...) static_cast<void>(__VA_ARGS__)
 #endif
 
 // Shut up IntelliSense warnings when using MSVC as an IDE, even though MSVC will obviously never
@@ -20,7 +20,6 @@
 #endif
 
 #define KHAX_lengthof(...) (sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]))
-#define KHAX_UNUSED(...) static_cast<void>(__VA_ARGS__)
 
 //------------------------------------------------------------------------------------------------
 namespace KHAX
@@ -29,6 +28,10 @@ namespace KHAX
 	// This code uses offsetof illegally (i.e. on polymorphic classes).
 	#pragma GCC diagnostic push
 	#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+
+	//------------------------------------------------------------------------------------------------
+	// Size of a page.
+	static constexpr const u32 PAGE_SIZE = 0x1000;
 
 	//------------------------------------------------------------------------------------------------
 	// General linked list node kernel object.
@@ -330,6 +333,27 @@ namespace KHAX
 	};
 	static_assert(offsetof(KProcess_8_0_0_New, m_svcAccessControl) == 0x090,
 		"KProcess_8_0_0_New isn't the expected layout.");
+
+	// Free block structure in the kernel, the one used in the memchunkhax exploit.
+	struct HeapFreeBlock
+	{
+		int m_count;
+		HeapFreeBlock *m_next;
+		HeapFreeBlock *m_prev;
+		int m_unknown1;
+		int m_unknown2;
+	};
+	static_assert(sizeof(HeapFreeBlock) == 0x014,
+		"HeapFreeBlock isn't the expected size.");
+
+	// The layout of a memory page.
+	union Page
+	{
+		unsigned char m_bytes[4096];
+		HeapFreeBlock m_freeBlock;
+	};
+	static_assert(sizeof(Page) == 0x1000,
+		"Page isn't the expected size.");
 
 	//------------------------------------------------------------------------------------------------
 	// Done using illegal offsetof
