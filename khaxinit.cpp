@@ -202,6 +202,8 @@ namespace KHAX
 	Result IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown = 0);
 	// gspwn, meant for reading from or writing to freed buffers.
 	Result GSPwn(void *dest, const void *src, std::size_t size, bool wait = true);
+	// Nuke the data cache with a bunch of bogus reads.
+	Result NukeDataCache();
 
 	static Result userFlushDataCache(const void *p, std::size_t n);
 	static Result userInvalidateDataCache(const void *p, std::size_t n);
@@ -1014,6 +1016,13 @@ Result KHAX::GSPwn(void *dest, const void *src, std::size_t size, bool wait)
 		gspWaitForPPF();
 	}
 
+	// Nuke the data cache.
+	if (Result result = NukeDataCache())
+	{
+		KHAX_printf("gspwn:NukeDataCache fail %08lx\n", result);
+		return result;
+	}
+
 	return 0;
 }
 
@@ -1050,6 +1059,32 @@ void KHAX::kernelCleanDataCacheLineWithMva(const void *p)
 void KHAX::kernelInvalidateInstructionCacheLineWithMva(const void *p)
 {
 	__asm__ volatile ("mcr p15, 0, %0, c7, c5, 1\n" :: "r"(p));
+}
+
+//------------------------------------------------------------------------------------------------
+// Flush the entire CPU data cache by nuking it from orbit.  This is a hack, but the system
+// call svcInvalidateDataCache is probably not accessible to us.
+Result KHAX::NukeDataCache()
+{
+	// Allocate a 2 MB dummy buffer.
+	enum : unsigned { DUMMY_ALLOC_SIZE = 2 * 1024 * 1024 };
+
+	u32 *dummyMemory = new(std::nothrow) u32[DUMMY_ALLOC_SIZE / sizeof(*dummyMemory)];
+	if (!dummyMemory)
+	{
+		return MakeError(26, 3, KHAX_MODULE, 1011);
+	}
+
+	// Read from each dword of the buffer in order to force everything else
+	// out of the data cache.
+	volatile u32 *volatileMemory = dummyMemory;
+	for (unsigned x = 0; x < DUMMY_ALLOC_SIZE / sizeof(*dummyMemory); ++x)
+		static_cast<void>(*volatileMemory++);
+
+	// Free the dummy buffer.
+	delete[] dummyMemory;
+
+	return 0;
 }
 
 //------------------------------------------------------------------------------------------------
