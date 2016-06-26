@@ -981,7 +981,7 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 	{
 		// Check whether the system is a New 3DS.  If this fails, abort, because being wrong would
 		// crash the system.
-		u8 isNew3DS = 0;
+		bool isNew3DS = false;
 		if (Result error = APT_CheckNew3DS(&isNew3DS))
 		{
 			*answer = false;
@@ -989,7 +989,7 @@ Result KHAX::IsNew3DS(bool *answer, u32 kernelVersionAlreadyKnown)
 		}
 
 		// Use the result of APT_CheckNew3DS.
-		*answer = isNew3DS != 0;
+		*answer = isNew3DS;
 		return 0;
 	}
 
