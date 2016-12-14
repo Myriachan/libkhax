@@ -14,6 +14,24 @@
 namespace KHAX
 {
 	//------------------------------------------------------------------------------------------------
+	// Work around reinterpret_cast not being allowed in constexpr functions.
+	template <typename P>
+	class PointerWrapper
+	{
+	public:
+		constexpr PointerWrapper(std::uintptr_t addr)
+		:	m_addr(addr)
+		{
+		}
+
+		operator P() const { return reinterpret_cast<P>(m_addr); }
+		decltype(*P()) operator *() const { return *reinterpret_cast<P>(m_addr); }
+
+	private:
+		const std::uintptr_t m_addr;
+	};
+
+	//------------------------------------------------------------------------------------------------
 	// Kernel and hardware version information.
 	struct VersionData
 	{
@@ -36,9 +54,9 @@ namespace KHAX
 		// Physical size of FCRAM on this machine
 		u32 m_fcramSize;
 		// Address of KThread address in kernel (KThread **)
-		static constexpr KThread **const m_currentKThreadPtr = reinterpret_cast<KThread **>(0xFFFF9000);
+		static constexpr const PointerWrapper<KThread **> m_currentKThreadPtr = 0xFFFF9000;
 		// Address of KProcess address in kernel (KProcess **)
-		static constexpr void **const m_currentKProcessPtr = reinterpret_cast<void **>(0xFFFF9004);
+		static constexpr const PointerWrapper<void **> m_currentKProcessPtr = 0xFFFF9004;
 		// Pseudo-handle of the current KProcess.
 		static constexpr const Handle m_currentKProcessHandle = 0xFFFF8001;
 		// Returned pointers within a KProcess object.  This abstracts out which particular
@@ -224,6 +242,11 @@ namespace KHAX
 //
 // Class VersionData
 //
+
+//------------------------------------------------------------------------------------------------
+// Needed for avoiding linker errors >.<
+constexpr const KHAX::PointerWrapper<KHAX::KThread **> KHAX::VersionData::m_currentKThreadPtr;
+constexpr const KHAX::PointerWrapper<void **> KHAX::VersionData::m_currentKProcessPtr;
 
 //------------------------------------------------------------------------------------------------
 // Creates a KProcessPointers for this kernel version and pointer to the object.
