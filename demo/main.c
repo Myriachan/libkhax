@@ -20,17 +20,9 @@ s32 dump_chunk_wrapper()
 }
 
 // Test access to "am" service, which we shouldn't have access to, unless khax succeeds.
-Result test_am_access_inner(char *productCode)
+Result test_am_access_inner()
 {
-	// Title IDs of "mset" in the six regions
-	static const u64 s_msetTitleIDs[] =
-	{
-		0x0004001000020000, 0x0004001000021000, 0x0004001000022000,
-		0x0004001000026000, 0x0004001000027000, 0x0004001000028000
-	};
 	Result result;
-	char productCodeTemp[16 + 1];
-	unsigned x;
 
 	// Initialize "am"
 	result = amInit();
@@ -39,32 +31,21 @@ Result test_am_access_inner(char *productCode)
 		return result;
 	}
 
-	// Check for the existence of the title IDs.
-	for (x = 0; x < KHAX_lengthof(s_msetTitleIDs); ++x)
+	Handle cia;
+	result = AM_StartCiaInstall(MEDIATYPE_SD, &cia);
+	if (result == 0)
 	{
-		result = AM_GetTitleProductCode(0, s_msetTitleIDs[x], productCodeTemp);
-		if (result == 0)
-		{
-			memcpy(productCode, productCodeTemp, sizeof(productCodeTemp));
-			amExit();
-			return 0;
-		}
+		AM_CancelCIAInstall(&cia);
 	}
 
 	amExit();
-	return -1;
+	return result;
 }
 
 // Self-contained test.
 void test_am_access_outer(int testNumber)
 {
-	char productCode[16 + 1];
-	Result result = test_am_access_inner(productCode);
-	if (result != 0)
-	{
-		productCode[0] = '\0';
-	}
-	printf("amtest%d:%08lx %s\n", testNumber, result, productCode);
+	printf("amtest%d:%08lx\n", testNumber, test_am_access_inner());
 }
 
 
@@ -88,12 +69,15 @@ int main()
 
 	Result result = khaxInit();
 	printf("khaxInit returned %08lx\n", result);
+	if (result == 0)
+	{
+		printf("backdoor returned %08lx\n", (svcBackdoor(dump_chunk_wrapper), g_backdoorResult));
 
-	printf("backdoor returned %08lx\n", (svcBackdoor(dump_chunk_wrapper), g_backdoorResult));
+		test_am_access_outer(2); // test after libkhax
 
-	test_am_access_outer(2); // test after libkhax
+		printf("khax demo main finished\n");
+	}
 
-	printf("khax demo main finished\n");
 	printf("Press X to exit\n");
 
 	khaxExit();
